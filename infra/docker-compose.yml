@@ -10,7 +10,7 @@ x-api-build: &api-build
   dockerfile: apps/panel-api/Dockerfile
 
 x-api-env: &api-env
-  PAYAMAKYAR_ENV: ${PAYAMAKYAR_ENV:-dev}
+  PAYAMAKYAR_ENV: ${PAYAMAKYAR_ENV:?set PAYAMAKYAR_ENV in infra/.env (dev for this stack)}
   PAYAMAKYAR_LOG_LEVEL: ${PAYAMAKYAR_LOG_LEVEL:-INFO}
   PAYAMAKYAR_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-payamakyar}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}@postgres:5432/${POSTGRES_DB:-payamakyar}
   PAYAMAKYAR_REDIS_URL: redis://redis:6379/0

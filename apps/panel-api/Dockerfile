@@ -21,9 +21,12 @@ RUN groupadd --system --gid 10001 app \
  && useradd --system --uid 10001 --gid app --home-dir /app --no-create-home --shell /usr/sbin/nologin app
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
+# Fail safe: without settings the image runs as prod (dev secrets refused); the dev compose
+# stack sets PAYAMAKYAR_ENV=dev explicitly from infra/.env.
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    PAYAMAKYAR_ENV=prod
 USER app
 EXPOSE 8000
 CMD ["python", "-m", "payamakyar.api", "serve", "--host", "0.0.0.0", "--port", "8000"]

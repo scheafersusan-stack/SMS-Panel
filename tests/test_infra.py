@@ -70,3 +70,11 @@ def test_hardening_of_one_shot_and_edge_services() -> None:
         assert "no-new-privileges:true" in services[name]["security_opt"]
     assert services["caddy"]["cap_drop"] == ["ALL"]
     assert services["caddy"]["cap_add"] == ["NET_BIND_SERVICE"]
+
+
+def test_image_defaults_to_prod_and_compose_sets_env_from_dotenv() -> None:
+    dockerfile = (ROOT / "apps/panel-api/Dockerfile").read_text()
+    assert "PAYAMAKYAR_ENV=prod" in dockerfile  # an image run without settings is prod
+    env = COMPOSE["x-api-env"]["PAYAMAKYAR_ENV"]
+    assert env.startswith("${PAYAMAKYAR_ENV:?")  # explicit, from infra/.env, no default
+    assert "PAYAMAKYAR_ENV=dev" in (ROOT / "infra/env/.env.example").read_text()

@@ -125,8 +125,9 @@ def test_import(): import payamakyar.core  # noqa: F401
 - Produces:
   - `class PanelSettings(BaseSettings)` (prefix `PAYAMAKYAR_`): `env: Literal["dev","test","prod"]`,
     `database_url: str`, `redis_url: str`, `secret_key: SecretStr` (Fernet key, required in prod),
-    `public_base_url: str`, `session_idle_seconds=1800`, `session_absolute_seconds=43200`,
-    `csrf_cookie_name="pk_csrf"`, `session_cookie_name="pk_session"`. `get_settings()` cached.
+    `public_base_url: str`, `csrf_cookie_name="pk_csrf"`, `session_cookie_name="pk_session"`.
+    `get_settings()` cached. Session lifetimes are not env settings: they are settings-store keys
+    (`session.idle_seconds=1800`, `session.absolute_seconds=43200`, settings store, Task 7).
   - `to_ascii_digits(s: str) -> str` (Persian ۰–۹ and Arabic ٠–٩).
   - `normalize_mobile(raw: str) -> str` returns `"989XXXXXXXXX"`; raises `InvalidMobile`.
   - `format_mobile_local(canon: str) -> str` returns `"09XXXXXXXXX"`.
@@ -246,7 +247,7 @@ def test_totp_roundtrip(): s = new_totp_secret(); assert verify_totp(s, pyotp.TO
   - CLI used by `make migrate`: `python -m payamakyar.db upgrade|downgrade <rev>`.
 
 - [ ] **Step 1: Failing tests** — `test_upgrade_and_downgrade_clean` (upgrade head on an empty
-  DB, assert all 14 tables exist; downgrade base leaves none); `test_username_case_insensitive_unique`.
+  DB, assert all 12 tables exist; downgrade base leaves none); `test_username_case_insensitive_unique`.
 - [ ] **Step 2: Run `uv run pytest packages/panel-db -q`** — FAIL.
 - [ ] **Step 3: Implement models and migration 0001** (enable `citext`; enums as `text` + CHECK).
   Seed nothing here (permissions are seeded in Task 11's migration).

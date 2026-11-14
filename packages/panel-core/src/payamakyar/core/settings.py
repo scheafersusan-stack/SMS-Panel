@@ -16,7 +16,12 @@ _PROD_REQUIRED = ("database_url", "redis_url", "secret_key", "public_base_url")
 
 
 class PanelSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="PAYAMAKYAR_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="PAYAMAKYAR_",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,  # errors are logged: never quote secrets or URLs back
+    )
 
     env: Literal["dev", "test", "prod"] = "dev"
     database_url: str = "postgresql+asyncpg://payamakyar:payamakyar@localhost:5432/payamakyar"

@@ -14,6 +14,7 @@ what is done per spec feature id.
 ```
 make install && make ci        # python gates
 make web-ci                    # web gates
+cp infra/env/.env.example infra/.env   # dev-only settings; compose refuses to start without them
 make dev                       # full stack in Docker: https://localhost:8443
 make create-admin USERNAME=ali MOBILE=09121234567
 ```

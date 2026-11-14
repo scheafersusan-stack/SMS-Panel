@@ -122,3 +122,22 @@ def test_serve_and_worker_settings_validated(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("PAYAMAKYAR_WORKER_POLL_SECONDS", "0")
     with pytest.raises(ValidationError):
         PanelSettings(_env_file=None)
+
+
+def test_validation_error_does_not_echo_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settings errors end up in logs: they must not quote the offending input values."""
+    _clean(monkeypatch)
+    secret = "S3cr3tK"  # short, so pydantic would not truncate it away
+    monkeypatch.setenv("PAYAMAKYAR_SECRET_KEY", secret)
+    monkeypatch.setenv("PAYAMAKYAR_DATABASE_URL", "postgresql://u:Pw9@db/x")
+    with pytest.raises(ValidationError) as info:  # model validator: not a Fernet key
+        PanelSettings(_env_file=None)
+    assert "Fernet" in str(info.value)
+    assert secret not in str(info.value)
+    assert "Pw9" not in str(info.value)
+    monkeypatch.setenv("PAYAMAKYAR_SECRET_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("PAYAMAKYAR_API_PORT", secret)  # a secret pasted into the wrong variable
+    with pytest.raises(ValidationError) as info:
+        PanelSettings(_env_file=None)
+    assert "api_port" in str(info.value)
+    assert secret not in str(info.value)
