@@ -3,6 +3,7 @@ import zlib
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -74,7 +75,7 @@ def test_cookie_attributes(env: str, secure: bool) -> None:
         "database_url": "postgresql+asyncpg://x/y",
         "redis_url": "redis://x",
         "public_base_url": "https://x",
-        "secret_key": "ZGV2LW9ubHktcGF5YW1ha3lhci1rZXktMDAwMDAwMDA=",
+        "secret_key": Fernet.generate_key().decode(),
     }
     settings = PanelSettings(env=env, **kwargs)  # type: ignore[arg-type]
     response = Response()

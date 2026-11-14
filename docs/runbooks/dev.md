@@ -23,9 +23,12 @@ marker. The end-to-end smoke test is `tests/e2e/test_smoke.py`.
 ## Full stack (Docker)
 
 ```
-cp infra/env/.env.example infra/.env      # optional: every value has a dev default
+cp infra/env/.env.example infra/.env      # required: secrets have no defaults in compose
 make dev                                  # docker compose -f infra/docker-compose.yml up --build
 ```
+
+The copied file holds dev-only secrets; with `PAYAMAKYAR_ENV=prod` the API refuses the dev key
+and dev database password at startup.
 
 Services: `postgres` (16), `redis` (7), `migrate` (one-shot `alembic upgrade head`), `api`
 (uvicorn on :8000, internal), `worker` (job worker) and `caddy` (the only published ports).

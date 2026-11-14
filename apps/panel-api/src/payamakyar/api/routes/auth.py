@@ -48,7 +48,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 MAX_PASSWORD_LENGTH = login.MAX_PASSWORD_LENGTH
 CUSTOMER_ROLE = "customer"
-_USERNAME = re.compile(r"[A-Za-z0-9_.]{3,32}")
+USERNAME_RE = re.compile(r"[A-Za-z0-9_.]{3,32}")
 _EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
@@ -171,7 +171,7 @@ def _validate_complete(body: CompleteBody, kind: str) -> None:
             raise validation_failed("نام شرکت الزامی است.", "/company_name")
     elif not body.last_name:
         raise validation_failed("نام خانوادگی الزامی است.", "/last_name")
-    if not _USERNAME.fullmatch(body.username):
+    if not USERNAME_RE.fullmatch(body.username):
         raise validation_failed(
             "نام کاربری باید ۳ تا ۳۲ نویسهٔ انگلیسی، رقم، _ یا . باشد.", "/username"
         )

@@ -1,12 +1,17 @@
+import asyncio
 import logging
 
 import pytest
 from fastapi import FastAPI
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from payamakyar.api import cli
+from payamakyar.core.logging import JsonFormatter
+from payamakyar.core.masking import mask_mobile
 from payamakyar.core.passwords import password_problems, verify_password
 from payamakyar.core.settings import PanelSettings
+from payamakyar.db.jobs import Worker, enqueue
 from payamakyar.db.models import AuditEvent, Job, Role, SystemMessage, User, UserRole
 
 
@@ -40,7 +45,11 @@ async def test_create_admin(app: FastAPI) -> None:
         ).scalars()
         assert list(roles) == ["admin"]
         ev = (
-            await s.execute(select(AuditEvent).where(AuditEvent.action == "user.create_admin"))
+            await s.execute(
+                select(AuditEvent).where(
+                    AuditEvent.action == "user.create_admin", AuditEvent.target_id == str(user.id)
+                )
+            )
         ).scalar_one()
         assert pw not in str(ev.after) and ev.target_id == str(user.id)
     with pytest.raises(cli.AdminBootstrapError, match="already"):
@@ -63,11 +72,39 @@ async def test_system_sms_handler_masks_and_prod_refuses(
         dev = cli.make_system_sms_handler(PanelSettings(env="test"))
         with caplog.at_level(logging.INFO, logger="payamakyar.api.cli"):
             await dev(s, job)
-        assert "989121112299" not in caplog.text and "123456" not in caplog.text
-        assert "would send" in caplog.text
+        (record,) = [r for r in caplog.records if r.name == "payamakyar.api.cli"]
+        assert record.to == mask_mobile("989121112299")  # type: ignore[attr-defined]
+        rendered = JsonFormatter().format(record)
+        assert "989121112299" not in rendered and "123456" not in rendered
+        assert "would send" in rendered and mask_mobile("989121112299") in rendered
         prod = cli.make_system_sms_handler(PanelSettings.model_construct(env="prod"))
         with pytest.raises(NotImplementedError):
             await prod(s, job)
+
+
+@pytest.mark.integration
+async def test_worker_stops_on_event_after_finishing_batch(app: FastAPI) -> None:
+    done: list[str] = []
+
+    async def handler(s: AsyncSession, job: Job) -> None:
+        await asyncio.sleep(0.2)  # still running when stop is requested
+        done.append(job.kind)
+
+    async with app.state.session_factory() as s:
+        await enqueue(s, "cli.test", {})
+        await s.commit()
+    worker = Worker(
+        ["cli.test"], handler, session_factory=app.state.session_factory, poll_interval=0.05
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(cli.run_worker(worker, stop))
+    await asyncio.sleep(0.1)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+    assert done == ["cli.test"]
+    async with app.state.session_factory() as s:
+        state = (await s.execute(select(Job.state).where(Job.kind == "cli.test"))).scalar_one()
+    assert state == "done"
 
 
 @pytest.mark.integration

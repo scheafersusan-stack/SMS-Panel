@@ -72,3 +72,53 @@ def test_get_settings_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     get_settings.cache_clear()
     assert get_settings() is get_settings()
     get_settings.cache_clear()
+
+
+def _prod_env(monkeypatch: pytest.MonkeyPatch, **over: str) -> None:
+    _clean(monkeypatch)
+    env = {
+        "ENV": "prod",
+        "SECRET_KEY": Fernet.generate_key().decode(),
+        "DATABASE_URL": "postgresql+asyncpg://u:Real-Pw-1@h/db",
+        "REDIS_URL": "redis://h/0",
+        "PUBLIC_BASE_URL": "https://x.example",
+        **over,
+    }
+    for k, v in env.items():
+        monkeypatch.setenv(f"PAYAMAKYAR_{k}", v)
+
+
+def test_prod_rejects_dev_secret_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from payamakyar.core.settings import DEV_SECRET_KEY
+
+    _prod_env(monkeypatch, SECRET_KEY=DEV_SECRET_KEY)
+    with pytest.raises(ValidationError, match="dev key"):
+        PanelSettings(_env_file=None)
+
+
+def test_prod_rejects_dev_database_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    _prod_env(monkeypatch, DATABASE_URL="postgresql+asyncpg://payamakyar:payamakyar@h/db")
+    with pytest.raises(ValidationError, match="dev database password"):
+        PanelSettings(_env_file=None)
+
+
+def test_dev_secrets_fine_outside_prod_and_real_ones_pass_in_prod(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prod_env(monkeypatch)
+    assert PanelSettings(_env_file=None).env == "prod"
+    _clean(monkeypatch)
+    assert PanelSettings(_env_file=None).env == "dev"
+
+
+def test_serve_and_worker_settings_validated(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clean(monkeypatch)
+    s = PanelSettings(_env_file=None)
+    assert (s.api_host, s.api_port, s.worker_poll_seconds) == ("127.0.0.1", 8000, 1.0)
+    monkeypatch.setenv("PAYAMAKYAR_API_PORT", "70000")
+    with pytest.raises(ValidationError):
+        PanelSettings(_env_file=None)
+    monkeypatch.setenv("PAYAMAKYAR_API_PORT", "9000")
+    monkeypatch.setenv("PAYAMAKYAR_WORKER_POLL_SECONDS", "0")
+    with pytest.raises(ValidationError):
+        PanelSettings(_env_file=None)

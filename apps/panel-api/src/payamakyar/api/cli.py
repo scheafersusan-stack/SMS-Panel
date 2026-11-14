@@ -6,6 +6,7 @@ import contextlib
 import logging
 import os
 import secrets
+import signal
 import string
 import sys
 from collections.abc import Sequence
@@ -16,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from payamakyar.api.notifier import JOB_KIND
+from payamakyar.api.routes.auth import USERNAME_RE
 from payamakyar.core.logging import configure_logging
 from payamakyar.core.masking import mask_mobile
 from payamakyar.core.passwords import hash_password, password_problems
@@ -28,7 +30,6 @@ from payamakyar.db.models import Role, SystemMessage, User, UserRole
 
 log = logging.getLogger("payamakyar.api.cli")
 
-_USERNAME_CHARS = frozenset(string.ascii_letters + string.digits + "_.")
 _SPECIALS = "!@#$%^&*-_=+?"
 _PASSWORD_LENGTH = 20
 
@@ -54,7 +55,7 @@ async def create_admin(
     The admin has no second factor yet: admin routes answer ``MFA_REQUIRED`` until the
     account enables TOTP. The audit row ``user.create_admin`` carries no secret.
     """
-    if not (3 <= len(username) <= 32 and set(username) <= _USERNAME_CHARS):
+    if not USERNAME_RE.fullmatch(username):
         raise AdminBootstrapError("username must be 3-32 chars of letters, digits, _ or .")
     try:
         canonical = normalize_mobile(mobile)
@@ -137,34 +138,53 @@ def make_system_sms_handler(settings: PanelSettings) -> Handler:
     return handle
 
 
+async def run_worker(worker: Worker, stop: asyncio.Event) -> None:
+    """Poll until ``stop`` is set; the batch in flight always finishes (its jobs complete or
+    fail normally, so no lease is left dangling)."""
+    while not stop.is_set():
+        try:
+            claimed = await worker.run_once()
+        except Exception:
+            log.exception("job worker poll failed")
+            claimed = 0
+        if claimed == 0:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), worker.poll_interval)
+
+
 def _worker_main() -> int:
     settings = get_settings()
 
     async def run() -> None:
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop.set)
         engine = create_engine(settings.database_url)
         try:
             worker = Worker(
                 [JOB_KIND],
                 make_system_sms_handler(settings),
                 session_factory=session_factory(engine),
-                poll_interval=float(os.environ.get("PAYAMAKYAR_WORKER_POLL_SECONDS", "1.0")),
+                poll_interval=settings.worker_poll_seconds,
             )
             log.info("worker started", extra={"kinds": worker.kinds})
-            await worker.run_forever()
+            await run_worker(worker, stop)
+            log.info("worker stopped")
         finally:
             await engine.dispose()
 
-    with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(run())
+    asyncio.run(run())
     return 0
 
 
 def _serve_main(args: argparse.Namespace) -> int:
+    settings = get_settings()
     uvicorn.run(
         "payamakyar.api.app:create_app",
         factory=True,
-        host=args.host,
-        port=args.port,
+        host=args.host or settings.api_host,
+        port=args.port or settings.api_port,
         log_config=None,
         proxy_headers=False,  # trust is decided by PAYAMAKYAR_TRUSTED_PROXIES only
     )
@@ -175,10 +195,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m payamakyar.api")
     sub = parser.add_subparsers(dest="command", required=True)
     serve = sub.add_parser("serve", help="run the HTTP API (uvicorn)")
-    serve.add_argument("--host", default=os.environ.get("PAYAMAKYAR_API_HOST", "127.0.0.1"))
-    serve.add_argument(
-        "--port", type=int, default=int(os.environ.get("PAYAMAKYAR_API_PORT", "8000"))
-    )
+    serve.add_argument("--host", default=None, help="default: PAYAMAKYAR_API_HOST")
+    serve.add_argument("--port", type=int, default=None, help="default: PAYAMAKYAR_API_PORT")
     sub.add_parser("worker", help="run the background job worker")
     sub.add_parser("migrate", help="alembic upgrade head (PAYAMAKYAR_DATABASE_URL)")
     admin = sub.add_parser("create-admin", help="create an admin with a one-time password")

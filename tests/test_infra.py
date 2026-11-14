@@ -41,3 +41,32 @@ def test_caddyfile_security_headers() -> None:
         "try_files {path} {path}/ /index.html",
     ):
         assert needle in text, needle
+
+
+def test_caddyfile_imports_csp_snippet_after_default_header() -> None:
+    lines = (ROOT / "infra/Caddyfile").read_text().splitlines()
+    default = next(
+        i for i, ln in enumerate(lines) if ln.strip().startswith("header Content-Security-Policy")
+    )
+    imported = next(
+        i for i, ln in enumerate(lines) if ln.strip().startswith("import /etc/caddy/csp/")
+    )
+    assert default < imported
+
+
+def test_compose_has_no_secret_defaults() -> None:
+    text = (ROOT / "infra/docker-compose.yml").read_text()
+    assert "ZGV2LW9ubHk" not in text  # the dev Fernet key
+    assert "PAYAMAKYAR_SECRET_KEY:?" in text
+    assert text.count("POSTGRES_PASSWORD:?") == 2
+    assert "POSTGRES_PASSWORD:-" not in text
+
+
+def test_hardening_of_one_shot_and_edge_services() -> None:
+    services = COMPOSE["services"]
+    for name in ("migrate", "api", "worker"):
+        assert services[name]["cap_drop"] == ["ALL"]
+        assert services[name]["read_only"] is True
+        assert "no-new-privileges:true" in services[name]["security_opt"]
+    assert services["caddy"]["cap_drop"] == ["ALL"]
+    assert services["caddy"]["cap_add"] == ["NET_BIND_SERVICE"]

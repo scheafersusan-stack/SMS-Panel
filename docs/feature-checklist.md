@@ -4,18 +4,18 @@ Every feature id from the design spec section 8 (`docs/superpowers/specs/2026-11
 A box is ticked only when the feature is fully delivered; a note says what is partial or deferred. Each phase's plan
 ends by ticking the ids it completes. Phase numbers are the spec's delivery phases.
 
-Phase 1 (foundation) ticks: `F1.1`, `F1.2`, `F1.6`, `F1.8`, `F9.20`, `F13.1`, `F13.2`, `F13.5`, `F13.8`.
+Phase 1 (foundation) ticks: `F1.8`, `F9.20`, `F13.2`, `F13.5`, `F13.8`. Partially delivered (unticked, with notes): `F1.1`, `F1.2`, `F1.3`, `F1.4`, `F1.6`, `F8.14`, `F8.15`, `F12.1`, `F13.1`, `F13.7`.
 
 ## 8.1 Accounts and identity
 
 | Done | Id | Feature | Phase | Note |
 |---|---|---|---|---|
-| [x] | F1.1 | Registration (person/company), mobile verification by OTP | 1 | OTP lands in the system-SMS outbox; operator delivery arrives with Phase 2. |
-| [x] | F1.2 | Login with password; second factor TOTP (ga) or SMS; login notice SMS | 1 | TOTP and SMS second factor, login notice queued to the outbox (operator delivery: Phase 2). |
+| [ ] | F1.1 | Registration (person/company), mobile verification by OTP | 1 | Partial: registration and OTP verification work; the OTP SMS only reaches the outbox (operator delivery: Phase 2). |
+| [ ] | F1.2 | Login with password; second factor TOTP (ga) or SMS; login notice SMS | 1 | Partial: password login with TOTP/SMS second factor works; login notice and SMS factor messages only reach the outbox (operator delivery: Phase 2). |
 | [ ] | F1.3 | Password reset by SMS/email; password policy | 1 | Partial: reset by SMS and the password policy are done; the email channel is not. |
 | [ ] | F1.4 | Account gates: registered → profile complete → identity matched → documents approved; each gate unlocks send… | 1, 6 | Partial: gate model and `registered`/`profile_complete` exist; identity and documents gates come with Phase 6. |
 | [ ] | F1.5 | Identity match national code ↔ mobile ↔ birth date (Shahkar via Jibit/Zohal/simulator); service error goes to… | 6 |  |
-| [x] | F1.6 | Person and company fields (national code, company national id, economic code, CEO) | 1 | Person and company fields on registration and the profile API; the admin edit screen is F8.1 (Phase 6). |
+| [ ] | F1.6 | Person and company fields (national code, company national id, economic code, CEO) | 1 | Partial: person/company fields exist in the schema and profile API; registration does not take identity/company fields and the web has no UI for them yet. |
 | [ ] | F1.7 | Document upload by type (person: national card, face photo, SIM ownership; company: CEO card, gazette, …), ≤… | 6 |  |
 | [x] | F1.8 | Allowed IPs and login hours; sessions list and revoke | 1 |  |
 | [ ] | F1.9 | API keys: create (shown once), scope, IP allowlist, revoke, last used; separate webservice credentials and… | 5 |  |
@@ -240,7 +240,7 @@ Phase 1 (foundation) ticks: `F1.1`, `F1.2`, `F1.6`, `F1.8`, `F9.20`, `F13.1`, `F
 
 | Done | Id | Feature | Phase | Note |
 |---|---|---|---|---|
-| [x] | F13.1 | Two-factor login; SMS to owner after each login | 1 | SMS to the owner is queued in the outbox; operator delivery: Phase 2. |
+| [ ] | F13.1 | Two-factor login; SMS to owner after each login | 1 | Partial: two-factor login works; the SMS to the owner only reaches the outbox (operator delivery: Phase 2). |
 | [x] | F13.2 | IP and login-hours restriction | 1 |  |
 | [ ] | F13.3 | API keys hashed, shown once, several with scope/IP | 5 |  |
 | [ ] | F13.4 | Separate API credentials and enable switch | 5 |  |
