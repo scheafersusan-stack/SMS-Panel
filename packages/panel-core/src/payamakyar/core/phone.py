@@ -6,8 +6,8 @@ _DIGIT_MAP = str.maketrans(
     "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
     "01234567890123456789",
 )
-_STRIP = re.compile(r"[\s\-().]")
-_LOCAL = re.compile(r"9\d{9}")
+_STRIP = re.compile(r"[\s\-().\u200c\u200e\u200f]")
+_LOCAL = re.compile(r"9[0-9]{9}")
 
 
 class InvalidMobile(ValueError):  # noqa: N818

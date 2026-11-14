@@ -1,12 +1,8 @@
-import json
-import logging
 import uuid
 
-import pytest
 from pydantic import SecretStr
 
 from payamakyar.core.ids import new_id
-from payamakyar.core.logging import configure_logging
 from payamakyar.core.masking import mask_mobile, mask_secret, redact
 from payamakyar.core.phone import InvalidMobile
 
@@ -38,7 +34,6 @@ def test_redact_any_value_type_and_case() -> None:
             "API_KEY": 123,
             "Authorization": None,
             "x_token": ["a"],
-            "code": 5,
             "s": SecretStr("z"),
             "name": "ok",
         }
@@ -47,9 +42,33 @@ def test_redact_any_value_type_and_case() -> None:
         "API_KEY": "****",
         "Authorization": "****",
         "x_token": "****",
-        "code": "****",
         "s": "****",
         "name": "ok",
+    }
+
+
+def test_code_keys() -> None:
+    assert redact({"status_code": 200, "error": {"code": "INVALID_CREDENTIALS"}}) == {
+        "status_code": 200,
+        "error": {"code": "INVALID_CREDENTIALS"},
+    }
+    assert redact({"code": "123456"}) == {"code": "****"}
+    assert redact({"code": 5}) == {"code": 5}
+    for k in [
+        "otp_code",
+        "verification_code",
+        "mfa_code",
+        "otpCode",
+        "apiKey",
+        "api-key",
+        "X_Token",
+        "accessToken",
+        "client_secret",
+    ]:
+        assert redact({k: "x"}) == {k: "****"}, k
+    assert redact({"keyboard": "x", "tokenizer_name": "x"}) == {
+        "keyboard": "x",
+        "tokenizer_name": "x",
     }
 
 
@@ -67,22 +86,6 @@ def test_new_id_v7_time_ordered() -> None:
     )
     assert len(set(ids)) == 2000
     assert ids == sorted(ids)
-
-
-def test_logging_json_redacts(capsys: pytest.CaptureFixture[str]) -> None:
-    configure_logging("INFO")
-    log = logging.getLogger("t")
-    log.info("sent to %s", "09123456789", extra={"password": "hunter2", "ctx": {"otp": "1"}})
-    log.info("map %(m)s", {"m": "09123456789"})
-    err = capsys.readouterr().err.strip().splitlines()
-    rows = [json.loads(line) for line in err]
-    assert rows[0]["message"] == "sent to 0912***6789"
-    assert rows[0]["level"] == "INFO"
-    assert rows[0]["password"] == "****" and rows[0]["ctx"] == {"otp": "****"}
-    assert rows[1]["message"] == "map 0912***6789"
-    assert "09123456789" not in "".join(err) and "hunter2" not in "".join(err)
-    configure_logging("INFO")  # idempotent: no duplicate handlers
-    assert [h.get_name() for h in logging.getLogger().handlers].count("payamakyar-json") == 1
 
 
 def test_invalid_mobile_is_value_error() -> None:

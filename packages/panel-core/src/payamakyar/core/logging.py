@@ -12,18 +12,32 @@ _STD = set(logging.LogRecord("", 0, "", 0, "", None, None).__dict__) | {"message
 _HANDLER_NAME = "payamakyar-json"
 
 
+_UNREDACTABLE = "[unredactable]"
+_PLAIN = (str, int, float, bool, bytes, type(None), dict, list, tuple, set, frozenset)
+
+
+def _safe(value: Any) -> Any:
+    """Redact ``value``; objects of other types are rendered with ``str`` first."""
+    if not isinstance(value, _PLAIN):
+        value = str(value)
+    return redact(value)
+
+
 class RedactFilter(logging.Filter):
-    """Apply ``redact`` to the message, its args and any extras."""
+    """Apply ``redact`` to the message, its args and any extras; never raises."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.msg, str):
-            record.msg = redact(record.msg)
-        if record.args:
-            record.args = redact(record.args)
+        try:
+            record.msg = _safe(record.msg)
+            if record.args:
+                record.args = _safe(record.args)
+        except Exception:
+            record.msg, record.args = _UNREDACTABLE, None
         for key in set(record.__dict__) - _STD:
-            record.__dict__[key] = (
-                "****" if redact({key: 0}).get(key) == "****" else redact(record.__dict__[key])
-            )
+            try:
+                record.__dict__[key] = redact({key: record.__dict__[key]})[key]
+            except Exception:
+                record.__dict__[key] = _UNREDACTABLE
         return True
 
 
@@ -33,7 +47,7 @@ class JsonFormatter(logging.Formatter):
             "ts": datetime.fromtimestamp(record.created, UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact(record.getMessage()),
         }
         for key in set(record.__dict__) - _STD:
             data[key] = record.__dict__[key]

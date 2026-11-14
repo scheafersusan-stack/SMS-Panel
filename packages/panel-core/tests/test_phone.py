@@ -20,6 +20,7 @@ from payamakyar.core.phone import (
         "٠٩١٢٣٤٥٦٧٨٩",
         " 0912 345 6789 ",
         "0912-345-6789",
+        "\u200f۰۹۱۲\u200c۳۴۵\u200e۶۷۸۹",
     ],
 )
 def test_normalize_mobile_variants(raw: str) -> None:
