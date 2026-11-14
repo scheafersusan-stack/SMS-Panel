@@ -2,9 +2,14 @@ const AR_FA: Record<string, string> = {};
 "۰۱۲۳۴۵۶۷۸۹".split("").forEach((c, i) => (AR_FA[c] = String(i)));
 "٠١٢٣٤٥٦٧٨٩".split("").forEach((c, i) => (AR_FA[c] = String(i)));
 
+/** Persian and Arabic-Indic digits to ASCII; everything else is left alone. */
+export function latinDigits(input: string): string {
+  return input.replace(/[۰-۹٠-٩]/g, (c) => AR_FA[c] ?? c);
+}
+
 /** Returns the canonical 09xxxxxxxxx form, or null when the input is not an Iranian mobile. */
 export function normalizeMobile(input: string): string | null {
-  let s = input.replace(/[۰-۹٠-٩]/g, (c) => AR_FA[c] ?? c).replace(/[\s\-().]/g, "");
+  let s = latinDigits(input).replace(/[\s\-().]/g, "");
   if (s.startsWith("+98")) s = s.slice(3);
   else if (s.startsWith("0098")) s = s.slice(4);
   else if (s.startsWith("98") && s.length === 12) s = s.slice(2);
