@@ -68,5 +68,5 @@ dev: ## placeholder: later tasks add the compose dev stack
 down: ## placeholder: later tasks add stack teardown
 	@echo "down: stack teardown is added by a later task"
 
-migrate: ## placeholder: later tasks add alembic upgrade
-	@echo "migrate: alembic upgrade is added by a later task"
+migrate: ## alembic upgrade head (PAYAMAKYAR_DATABASE_URL)
+	$(UV) run python -m payamakyar.db upgrade head

@@ -89,3 +89,7 @@ skip_covered = true
 
 [tool.bandit]
 exclude_dirs = [".venv", ".worktrees", ".build", "node_modules", "tests", "apps/panel-web"]
+
+[[tool.mypy.overrides]]
+module = ["asyncpg", "asyncpg.*"]
+ignore_missing_imports = true
