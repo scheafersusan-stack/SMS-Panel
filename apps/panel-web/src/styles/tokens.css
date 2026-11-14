@@ -1,0 +1,87 @@
+/* پنل پیامک — generated from tokens.json */
+:root, [data-theme="light"] {
+  --surface: #f5f8f8;
+  --surface-raised: #ffffff;
+  --surface-sunken: #ecf1f1;
+  --border: #d5dedf;
+  --border-strong: #7d9195;
+  --ink: #14232b;
+  --ink-muted: #4f6168;
+  --ink-subtle: #5f7177;
+  --primary: #0f6b6e;
+  --primary-hover: #0b5659;
+  --primary-soft: #e2f1f0;
+  --on-primary: #ffffff;
+  --accent: #e0a526;
+  --accent-soft: #fbf1da;
+  --on-accent: #2b1d00;
+  --success: #1f7a4d;
+  --success-soft: #e3f3ea;
+  --warning: #9a5a00;
+  --warning-soft: #fcefd9;
+  --danger: #c2372b;
+  --danger-soft: #fbe6e3;
+  --info: #2a62b8;
+  --info-soft: #e4edfa;
+  --focus: #0f6b6e;
+  --overlay: rgba(10, 20, 24, 0.5);
+  --shadow-sm: 0 1px 2px rgba(20, 35, 43, 0.06);
+  --shadow-md: 0 6px 16px rgba(20, 35, 43, 0.10);
+  --shadow-lg: 0 20px 48px rgba(20, 35, 43, 0.18);
+}
+[data-theme="dark"] {
+  --surface: #0e1618;
+  --surface-raised: #152125;
+  --surface-sunken: #0a1113;
+  --border: #2a3a3e;
+  --border-strong: #61777c;
+  --ink: #e6eeef;
+  --ink-muted: #a3b4b8;
+  --ink-subtle: #8a9ea2;
+  --primary: #3fb7b3;
+  --primary-hover: #5ccbc7;
+  --primary-soft: #133a3b;
+  --on-primary: #062223;
+  --accent: #f0bc4e;
+  --accent-soft: #3a2e12;
+  --on-accent: #1e1500;
+  --success: #4cc48a;
+  --success-soft: #12301f;
+  --warning: #f2a93b;
+  --warning-soft: #3a2a10;
+  --danger: #f07a6e;
+  --danger-soft: #3d1916;
+  --info: #7aa8f0;
+  --info-soft: #16243d;
+  --focus: #f0bc4e;
+  --overlay: rgba(0, 0, 0, 0.62);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 6px 16px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 20px 48px rgba(0, 0, 0, 0.6);
+}
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+  --font-sans: "Vazirmatn", Tahoma, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+.display { font-family: var(--font-sans); font-size: 32px; line-height: 48px; font-weight: 800; }
+.kpi { font-family: var(--font-sans); font-size: 28px; line-height: 36px; font-weight: 700; }
+.h1 { font-family: var(--font-sans); font-size: 24px; line-height: 36px; font-weight: 700; }
+.h2 { font-family: var(--font-sans); font-size: 20px; line-height: 32px; font-weight: 700; }
+.h3 { font-family: var(--font-sans); font-size: 16px; line-height: 26px; font-weight: 600; }
+.body { font-family: var(--font-sans); font-size: 14px; line-height: 24px; font-weight: 400; }
+.body-sm { font-family: var(--font-sans); font-size: 13px; line-height: 22px; font-weight: 400; }
+.label { font-family: var(--font-sans); font-size: 13px; line-height: 20px; font-weight: 600; }
+.caption { font-family: var(--font-sans); font-size: 12px; line-height: 18px; font-weight: 500; }
+.code { font-family: var(--font-mono); font-size: 13px; line-height: 20px; font-weight: 400; }
