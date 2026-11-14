@@ -12,7 +12,6 @@ from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, StringConstraints
 from redis.asyncio import Redis
 from sqlalchemy import func, select, text, update
-from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -162,11 +161,7 @@ async def register_start(
 
 
 async def _customer_role_id(s: AsyncSession) -> uuid.UUID:
-    await s.execute(
-        insert(Role)
-        .values(name=CUSTOMER_ROLE, title_fa="مشتری")
-        .on_conflict_do_nothing(index_elements=[Role.name])
-    )
+    # Seeded by migration 0003; a missing row is a deployment error (500), not a fallback.
     return (await s.execute(select(Role.id).where(Role.name == CUSTOMER_ROLE))).scalar_one()
 
 

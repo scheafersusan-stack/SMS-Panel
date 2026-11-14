@@ -7,13 +7,16 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import Depends, Request
+from fastapi.params import Depends as DependsMarker
 from redis.asyncio import Redis
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from payamakyar.api import csrf, sessions
 from payamakyar.api.errors import ApiError
+from payamakyar.core.permissions import STAFF_CODES
 from payamakyar.core.settings import PanelSettings
-from payamakyar.db.models import Session, User
+from payamakyar.db.models import RolePermission, Session, User, UserRole
 
 IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
@@ -123,3 +126,47 @@ async def current_user(row: CurrentSession, s: SessionDep) -> User:
 
 
 CurrentUser = Annotated[User, Depends(current_user)]
+
+
+async def user_permissions(user: CurrentUser, s: SessionDep) -> frozenset[str]:
+    """The user's effective permission codes (one query; FastAPI caches it per request)."""
+    rows = await s.execute(
+        select(RolePermission.permission_code)
+        .join(UserRole, UserRole.role_id == RolePermission.role_id)
+        .where(UserRole.user_id == user.id)
+    )
+    return frozenset(rows.scalars())
+
+
+Permissions = Annotated[frozenset[str], Depends(user_permissions)]
+
+
+def forbidden() -> ApiError:
+    return ApiError(403, "FORBIDDEN", "دسترسی مجاز نیست", "شما اجازه انجام این کار را ندارید.")
+
+
+async def admin_gate(user: CurrentUser, perms: Permissions) -> None:
+    """Attached to the admin router: staff only, and staff must have MFA enabled.
+
+    Anyone without a single staff permission gets FORBIDDEN (customers never learn about MFA).
+    """
+    if not perms & STAFF_CODES:
+        raise forbidden()
+    if user.mfa_method == "none":
+        raise ApiError(
+            403,
+            "MFA_REQUIRED",
+            "فعال‌سازی ورود دومرحله‌ای لازم است",
+            "برای دسترسی به بخش مدیریت، ورود دومرحله‌ای را فعال کنید.",
+        )
+
+
+def require(*codes: str) -> DependsMarker:
+    """Route dependency: 403 ``FORBIDDEN`` unless the user holds every permission in ``codes``."""
+
+    async def check(perms: Permissions) -> None:
+        if not set(codes) <= perms:
+            raise forbidden()
+
+    dep: DependsMarker = Depends(check)
+    return dep

@@ -6,18 +6,18 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, FastAPI, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from redis.asyncio import Redis
 from starlette._utils import get_route_path
 
 from payamakyar.api import csrf
-from payamakyar.api.deps import parse_trusted_proxies
+from payamakyar.api.deps import admin_gate, parse_trusted_proxies
 from payamakyar.api.errors import (
     error_response,
     install_error_handlers,
     internal_error_response,
 )
-from payamakyar.api.routes import account, auth, health
+from payamakyar.api.routes import account, admin_rbac, auth, health
 from payamakyar.core.settings import PanelSettings, get_settings
 from payamakyar.db.engine import create_engine, session_factory
 
@@ -78,7 +78,8 @@ def create_app(settings: PanelSettings | None = None) -> FastAPI:
     web = APIRouter(prefix="/panel/web/v1")
     web.include_router(auth.router)
     web.include_router(account.router)
-    admin = APIRouter(prefix="/panel/admin/v1")
+    admin = APIRouter(prefix="/panel/admin/v1", dependencies=[Depends(admin_gate)])
+    admin.include_router(admin_rbac.router)
     app.include_router(health.router)
     app.include_router(web)
     app.include_router(admin)
