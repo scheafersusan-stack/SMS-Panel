@@ -147,8 +147,9 @@ def forbidden(
     return ApiError(403, "FORBIDDEN", "دسترسی مجاز نیست", detail, pointer)
 
 
-async def admin_gate(user: CurrentUser, perms: Permissions) -> None:
-    """Attached to the admin router: staff only, and staff must have MFA enabled.
+async def admin_gate(row: CurrentSession, user: CurrentUser, perms: Permissions) -> None:
+    """Attached to the admin router: staff only, staff must have MFA enabled, and the current
+    session must have been opened through the second factor (``sessions.mfa_at``).
 
     Anyone without a single staff permission gets FORBIDDEN (customers never learn about MFA).
     """
@@ -160,6 +161,13 @@ async def admin_gate(user: CurrentUser, perms: Permissions) -> None:
             "MFA_REQUIRED",
             "فعال‌سازی ورود دومرحله‌ای لازم است",
             "برای دسترسی به بخش مدیریت، ورود دومرحله‌ای را فعال کنید.",
+        )
+    if row.mfa_at is None:
+        raise ApiError(
+            403,
+            "MFA_REQUIRED",
+            "ورود دومرحله‌ای لازم است",
+            "برای دسترسی به بخش مدیریت، خارج شوید و دوباره با ورود دومرحله‌ای وارد شوید.",
         )
 
 

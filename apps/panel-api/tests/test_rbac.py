@@ -1,5 +1,6 @@
 import itertools
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -27,8 +28,10 @@ _HASH = hash_password("Str0ng!Passw0rd")
 
 
 async def _make(
-    app: FastAPI, roles: list[str], mfa: str = "totp"
+    app: FastAPI, roles: list[str], mfa: str = "totp", *, second_factor: bool = True
 ) -> tuple[User, httpx.AsyncClient]:
+    """A user with ``roles`` and a session; the session counts as signed in with the second
+    factor (``sessions.mfa_at``) when the user has one and ``second_factor`` is true."""
     n = next(_seq)
     async with app.state.session_factory() as s:
         user = User(
@@ -42,7 +45,8 @@ async def _make(
         for name in roles:
             rid = (await s.execute(select(Role.id).where(Role.name == name))).scalar_one()
             s.add(UserRole(user_id=user.id, role_id=rid))
-        token, csrf = await sessions.create(s, user, None, None)
+        mfa_at = datetime.now(UTC) if second_factor and mfa != "none" else None
+        token, csrf = await sessions.create(s, user, None, None, mfa_at=mfa_at)
         await s.commit()
         await s.refresh(user)
     cfg = app.state.settings
@@ -151,6 +155,17 @@ async def test_admin_without_mfa_gets_mfa_required(app: FastAPI) -> None:
     assert r.status_code == 403
     assert _err(r) == "MFA_REQUIRED"
     assert (await c.post(ROLES, json={})).status_code == 403
+
+
+async def test_admin_session_without_second_factor_gets_mfa_required(app: FastAPI) -> None:
+    """MFA enabled on the account is not enough: this session must have used it."""
+    _, c = await _make(app, ["admin"], mfa="totp", second_factor=False)
+    r = await c.get(ROLES)
+    assert r.status_code == 403
+    assert _err(r) == "MFA_REQUIRED"
+    assert "دوباره" in r.json()["error"]["detail"]
+    _, ok = await _make(app, ["admin"], mfa="totp")
+    assert (await ok.get(ROLES)).status_code == 200
 
 
 async def test_staff_missing_permission_forbidden(app: FastAPI) -> None:

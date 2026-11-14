@@ -125,6 +125,9 @@ async def test_smoke(app: FastAPI) -> None:
             headers=_csrf(admin),
         )
         assert r.status_code == 204, r.text
+        # This session signed in with the password only: still gated until a fresh MFA login.
+        gated = await admin.get(f"{ADMIN}/audit")
+        assert gated.status_code == 403 and gated.json()["error"]["code"] == "MFA_REQUIRED"
 
     # 5. login again: password -> mfa_required -> mfa/confirm with the next TOTP step
     async with _client(app) as admin:

@@ -390,7 +390,15 @@ async def _complete_login(
             extra={"user_id": str(user.id), "mobile": mask_mobile(user.mobile)},
         )
     lifetime = await sessions.absolute_lifetime(s)
-    token, csrf = await sessions.create(s, user, ip, ua, now=now, absolute_seconds=lifetime)
+    token, csrf = await sessions.create(
+        s,
+        user,
+        ip,
+        ua,
+        now=now,
+        absolute_seconds=lifetime,
+        mfa_at=now if factor in ("totp", "sms") else None,
+    )
     sessions.set_cookies(response, settings, token, csrf, max_age=lifetime)
     return LoginOk(
         user=UserOut(

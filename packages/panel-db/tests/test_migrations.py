@@ -126,6 +126,17 @@ async def test_downgrade_refuses_when_staff_role_in_use(pg_url: str) -> None:
         await _drop_db(pg_url, name)
 
 
+async def test_sessions_have_mfa_at(db_url: str) -> None:
+    rows = await _fetch(
+        db_url.replace("+asyncpg", ""),
+        "SELECT data_type, is_nullable FROM information_schema.columns"
+        " WHERE table_name = 'sessions' AND column_name = 'mfa_at'",
+    )
+    assert [(r["data_type"], r["is_nullable"]) for r in rows] == [
+        ("timestamp with time zone", "YES")
+    ]
+
+
 def test_models_match_migration(db_url: str) -> None:
     diffs = asyncio.run(_diff(db_url))
     assert diffs == []

@@ -45,8 +45,12 @@ async def create(
     *,
     now: datetime | None = None,
     absolute_seconds: int | None = None,
+    mfa_at: datetime | None = None,
 ) -> tuple[str, str]:
-    """Insert a session row and return ``(token, csrf)``. Does not commit."""
+    """Insert a session row and return ``(token, csrf)``. Does not commit.
+
+    ``mfa_at`` is set only for a sign-in that passed a second factor (staff routes need it).
+    """
     at = now or datetime.now(UTC)
     lifetime = absolute_seconds if absolute_seconds is not None else await absolute_lifetime(s)
     token = secrets.token_urlsafe(32)
@@ -62,6 +66,7 @@ async def create(
             last_seen_at=at,
             expires_at=at + timedelta(seconds=lifetime),
             impersonator_id=impersonator_id,
+            mfa_at=mfa_at,
         )
     )
     await s.flush()

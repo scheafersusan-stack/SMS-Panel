@@ -67,8 +67,10 @@ uv run python -m payamakyar.api create-admin --username ali --mobile 09121234567
 It prints a strong one-time password exactly once and records the audit event
 `user.create_admin`. The admin can log in, but every `/panel/admin/v1/*` route answers
 `MFA_REQUIRED` until the account enables TOTP (profile, security, authenticator app; the
-account password is required to confirm). Log in again with the 6-digit code to reach the admin
-API. Change the one-time password after first login.
+account password is required to confirm). MFA is checked per session: the session must have
+been opened through the second factor (`sessions.mfa_at`, set by `auth/mfa/confirm`), so the
+session in which TOTP was enabled stays gated. Log out and log in again with the 6-digit code to
+reach the admin API. Change the one-time password after first login.
 
 ## Worker and system SMS
 
@@ -85,6 +87,7 @@ docker compose -f infra/docker-compose.yml exec postgres \
 
 ## Troubleshooting
 
-- `MFA_REQUIRED` on admin routes: enable TOTP first (above).
+- `MFA_REQUIRED` on admin routes: enable TOTP first (above), then log out and log in again with
+  the code; a password-only session never reaches the admin API.
 - Client IP shows the proxy address: `PAYAMAKYAR_TRUSTED_PROXIES` does not cover the compose network.
 - Blank page behind Caddy: the CSP snippet is stale or missing; rebuild (`make dev` rebuilds images).

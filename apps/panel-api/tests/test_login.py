@@ -119,6 +119,14 @@ def _csrf(client: httpx.AsyncClient) -> dict[str, str]:
     return {"X-CSRF-Token": client.cookies["pk_csrf"]}
 
 
+async def _session_mfa_at(app: FastAPI, user_id: uuid.UUID) -> list[datetime | None]:
+    async with app.state.session_factory() as s:
+        rows = await s.execute(
+            select(Session.mfa_at).where(Session.user_id == user_id).order_by(Session.id)
+        )
+        return list(rows.scalars())
+
+
 def _err(r: httpx.Response) -> str:
     code: str = r.json()["error"]["code"]
     return code
@@ -145,6 +153,7 @@ async def test_login_ok_sets_cookies_and_records(
     assert fresh.last_login_at == clock.now
     assert fresh.failed_logins == 0
     assert await _events(app, user.id) == ["success"]
+    assert await _session_mfa_at(app, user.id) == [None]  # password only: no second factor
     async with app.state.session_factory() as s:
         audit = (
             await s.execute(
@@ -396,6 +405,7 @@ async def test_totp_flow_and_replay(app: FastAPI, client: httpx.AsyncClient, clo
     assert fresh.last_login_at == clock.now
     events = await _events(app, user.id)
     assert events == ["mfa_required", "mfa_failed", "success"]
+    assert await _session_mfa_at(app, user.id) == [clock.now]  # second factor recorded
 
     # Replay of the same code (same time-step) is refused, even through a fresh login.
     r = await _login(client, user.username)
@@ -488,6 +498,7 @@ async def test_sms_flow(app: FastAPI, client: httpx.AsyncClient, clock: Clock) -
     assert "pk_session" in ok.cookies
     assert (await _get_user(app, user.id)).failed_logins == 0
     assert await _events(app, user.id) == ["mfa_required", "mfa_failed", "success"]
+    assert await _session_mfa_at(app, user.id) == [clock.now]
     # The token (and with it the code) is single-use.
     reuse = await client.post(MFA_CONFIRM, json={"mfa_token": token, "code": code})
     assert reuse.status_code == 401

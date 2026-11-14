@@ -25,6 +25,8 @@ _HASH = hash_password("Str0ng!Passw0rd")
 async def _make(
     app: FastAPI, roles: tuple[str, ...], mfa: str = "totp"
 ) -> tuple[User, httpx.AsyncClient]:
+    """A user with ``roles`` and a session signed in with the second factor (when any)."""
+    second_factor = True
     n = next(_seq)
     async with app.state.session_factory() as s:
         user = User(
@@ -38,7 +40,8 @@ async def _make(
         for name in roles:
             rid = (await s.execute(select(Role.id).where(Role.name == name))).scalar_one()
             s.add(UserRole(user_id=user.id, role_id=rid))
-        token, csrf = await sessions.create(s, user, None, None)
+        mfa_at = datetime.now(UTC) if second_factor and mfa != "none" else None
+        token, csrf = await sessions.create(s, user, None, None, mfa_at=mfa_at)
         await s.commit()
         await s.refresh(user)
     cfg = app.state.settings

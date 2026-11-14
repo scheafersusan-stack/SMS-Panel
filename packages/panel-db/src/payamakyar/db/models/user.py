@@ -102,6 +102,9 @@ class Session(Base):
     expires_at: Mapped[datetime] = mapped_column(_ts())
     revoked_at: Mapped[datetime | None] = mapped_column(_ts())
     impersonator_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    mfa_at: Mapped[datetime | None] = mapped_column(_ts())
+    """When this session passed a second factor (``auth/mfa/confirm``); NULL for a
+    password-only sign-in. Staff routes require it."""
 
 
 class OtpChallenge(Base):
