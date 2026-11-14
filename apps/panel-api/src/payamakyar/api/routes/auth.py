@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Request, Response
-from pydantic import BaseModel, StringConstraints
+from pydantic import BaseModel, StringConstraints, field_validator
 from redis.asyncio import Redis
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -71,7 +71,7 @@ async def _stored_kind(redis: Redis, challenge_id: uuid.UUID) -> str | None:
     if raw is None:
         return None
     value = raw.decode() if isinstance(raw, bytes) else str(raw)
-    return value if value in ("individual", "company") else None
+    return value if value in ("person", "company") else None
 
 
 async def _ensure_resend_window(
@@ -95,7 +95,13 @@ async def _ensure_resend_window(
 
 class StartBody(BaseModel):
     mobile: str
-    kind: Literal["individual", "company"]
+    kind: Literal["person", "company", "individual"]
+    """``individual`` is an accepted alias of ``person`` (stored as ``person``)."""
+
+    @field_validator("kind")
+    @classmethod
+    def _alias(cls, v: str) -> str:
+        return "person" if v == "individual" else v
 
 
 class StartResult(BaseModel):
@@ -203,7 +209,7 @@ async def register_complete(
     await login.check_new_password(s, body.password, "/password")
     row = await otp.check(s, body.challenge_id, body.code, "register", now=now)
     user = User(
-        kind="company" if kind == "company" else "person",
+        kind=kind,
         username=body.username,
         mobile=row.mobile,
         email=body.email,
@@ -211,7 +217,7 @@ async def register_complete(
         status="active",
         identity_state="none",
         first_name=body.first_name,
-        last_name=body.last_name if kind == "individual" else None,
+        last_name=body.last_name if kind == "person" else None,
         company_name=body.company_name if kind == "company" else None,
     )
     try:

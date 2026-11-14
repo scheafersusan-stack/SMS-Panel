@@ -71,7 +71,7 @@ async def test_smoke(app: FastAPI) -> None:
     # 1. register (OTP via the outbox) -> session cookies
     async with _client(app) as c:
         r = await c.post(
-            f"{WEB}/auth/register/start", json={"mobile": "09121234567", "kind": "individual"}
+            f"{WEB}/auth/register/start", json={"mobile": "09121234567", "kind": "person"}
         )
         assert r.status_code == 202, r.text
         code = await _otp_for(app, "989121234567")

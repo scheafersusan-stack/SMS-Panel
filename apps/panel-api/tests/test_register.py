@@ -85,9 +85,7 @@ def _body(challenge_id: str, code: str, username: str, **over: Any) -> dict[str,
     return {k: v for k, v in body.items() if v is not None}
 
 
-async def _start(
-    client: httpx.AsyncClient, mobile: str, kind: str = "individual"
-) -> httpx.Response:
+async def _start(client: httpx.AsyncClient, mobile: str, kind: str = "person") -> httpx.Response:
     return await client.post(START, json={"mobile": mobile, "kind": kind})
 
 
@@ -138,6 +136,19 @@ async def test_register_happy_path(app: FastAPI, client: httpx.AsyncClient, cloc
         assert await verify_chain(s) is None
 
 
+async def test_individual_is_an_alias_of_person(
+    app: FastAPI, client: httpx.AsyncClient, clock: Clock
+) -> None:
+    local, canon, username = _fresh()
+    cid = (await _start(client, local, "individual")).json()["challenge_id"]
+    code = await _code_for(app, canon)
+    r = await client.post(COMPLETE, json=_body(cid, code, username))
+    assert r.status_code == 201, r.text
+    async with app.state.session_factory() as s:
+        user = (await s.execute(select(User).where(User.username == username))).scalar_one()
+        assert (user.kind, user.last_name) == ("person", "رضایی")
+
+
 async def test_company_registration(app: FastAPI, client: httpx.AsyncClient, clock: Clock) -> None:
     local, canon, username = _fresh()
     cid = (await _start(client, local, "company")).json()["challenge_id"]
@@ -154,7 +165,11 @@ async def test_company_registration(app: FastAPI, client: httpx.AsyncClient, clo
 
 @pytest.mark.parametrize(
     ("kind", "drop", "pointer"),
-    [("individual", "last_name", "/last_name"), ("company", "company_name", "/company_name")],
+    [
+        ("person", "last_name", "/last_name"),
+        ("individual", "last_name", "/last_name"),
+        ("company", "company_name", "/company_name"),
+    ],
 )
 async def test_kind_specific_required(
     app: FastAPI, client: httpx.AsyncClient, clock: Clock, kind: str, drop: str, pointer: str
@@ -188,6 +203,8 @@ async def test_weak_password(app: FastAPI, client: httpx.AsyncClient, clock: Clo
     assert err["source"] == {"pointer": "/password"}
     for problem in ("TOO_SHORT", "NO_UPPER", "NO_DIGIT", "NO_SPECIAL"):
         assert problem in err["detail"]
+    # The current minimum travels with TOO_SHORT so the page can say it.
+    assert "MIN_LENGTH:8" in err["detail"].split(",")
     # The OTP was not burned by the rejected password: the same code still works.
     r = await client.post(COMPLETE, json=_body(cid, code, username))
     assert r.status_code == 201
@@ -201,6 +218,7 @@ async def test_password_too_long(app: FastAPI, client: httpx.AsyncClient, clock:
     r = await client.post(COMPLETE, json=_body(cid, code, username, password=long_pw))
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "PASSWORD_TOO_LONG"
+    assert "۱۲۸" in r.json()["error"]["detail"]
     ok_pw = "Aa1!" + "x" * 124  # exactly 128
     r = await client.post(COMPLETE, json=_body(cid, code, username, password=ok_pw))
     assert r.status_code == 201

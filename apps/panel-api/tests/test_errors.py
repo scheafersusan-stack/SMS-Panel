@@ -1,9 +1,12 @@
+import uuid
+from typing import Literal
+
 import httpx
 import pytest
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from payamakyar.api.errors import ApiError
+from payamakyar.api.errors import ApiError, persian_validation_message, validation_pointer
 
 pytestmark = pytest.mark.integration
 
@@ -12,10 +15,40 @@ class Body(BaseModel):
     mobile: str
 
 
+class Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=3, max_length=5)
+    kind: Literal["a", "b"] = "a"
+    tags: list[str] = Field(default_factory=list, max_length=2)
+    ref: uuid.UUID | None = None
+    note: str | None = None
+
+    @field_validator("note")
+    @classmethod
+    def _note(cls, v: str | None) -> str | None:
+        if v == "fa":
+            raise ValueError("یادداشت نامعتبر است.")
+        if v == "en":
+            raise ValueError("bad note")
+        return v
+
+
 def _routes(app: FastAPI) -> None:
     @app.post("/panel/web/v1/_t/echo")
     async def echo(body: Body) -> dict[str, str]:
         return {"mobile": body.mobile}
+
+    @app.post("/panel/web/v1/_t/strict")
+    async def strict(body: Strict) -> None:
+        return None
+
+    @app.get("/panel/web/v1/_t/q")
+    async def query(page: int, flag: bool = False) -> None:
+        return None
+
+    @app.get("/panel/web/v1/_t/item/{item_id}")
+    async def item(item_id: uuid.UUID) -> None:
+        return None
 
     @app.get("/panel/web/v1/_t/api")
     async def api() -> None:
@@ -61,6 +94,99 @@ async def test_validation_pointer(app: FastAPI, client: httpx.AsyncClient) -> No
     err = r.json()["error"]
     assert err["code"] == "VALIDATION_FAILED"
     assert err["source"] == {"pointer": "/mobile"}
+    assert err["detail"] == "این فیلد الزامی است."
+
+
+@pytest.mark.parametrize(
+    ("body", "pointer", "detail"),
+    [
+        ({"name": "ab"}, "/name", "دست‌کم ۳ نویسه وارد کنید."),
+        ({"name": "abcdefgh"}, "/name", "حداکثر ۵ نویسه مجاز است."),
+        ({"name": "abc", "kind": "z"}, "/kind", "مقدار انتخاب‌شده مجاز نیست."),
+        ({"name": "abc", "tags": ["1", "2", "3"]}, "/tags", "حداکثر ۲ مورد مجاز است."),
+        ({"name": "abc", "ref": "nope"}, "/ref", "شناسه معتبر نیست."),
+        ({"name": "abc", "extra": 1}, "/extra", "این فیلد مجاز نیست."),
+        ({"name": "abc", "note": "fa"}, "/note", "یادداشت نامعتبر است."),
+        ({"name": "abc", "note": "en"}, "/note", "مقدار واردشده معتبر نیست."),
+        ({"name": 5}, "/name", "مقدار واردشده معتبر نیست."),
+        ([1, 2], None, "مقدار واردشده معتبر نیست."),
+    ],
+)
+async def test_validation_in_persian(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    body: object,
+    pointer: str | None,
+    detail: str,
+) -> None:
+    _routes(app)
+    client.cookies.set("pk_csrf", "tok")
+    r = await client.post("/panel/web/v1/_t/strict", json=body, headers=CSRF)
+    assert r.status_code == 422
+    err = r.json()["error"]
+    assert err["code"] == "VALIDATION_FAILED"
+    assert err["detail"] == detail
+    assert err["source"] == ({"pointer": pointer} if pointer else None)
+
+
+async def test_invalid_json_has_no_pointer(app: FastAPI, client: httpx.AsyncClient) -> None:
+    _routes(app)
+    client.cookies.set("pk_csrf", "tok")
+    r = await client.post(
+        "/panel/web/v1/_t/strict",
+        content=b'{"name": ',
+        headers={**CSRF, "Content-Type": "application/json"},
+    )
+    assert r.status_code == 422
+    err = r.json()["error"]
+    assert err["detail"] == "بدنهٔ درخواست JSON معتبر نیست."
+    assert err["source"] is None
+
+
+async def test_query_and_path_pointers(app: FastAPI, client: httpx.AsyncClient) -> None:
+    _routes(app)
+    r = await client.get("/panel/web/v1/_t/q", params={"page": "x"})
+    err = r.json()["error"]
+    assert (r.status_code, err["source"], err["detail"]) == (
+        422,
+        {"pointer": "/page"},
+        "یک عدد صحیح وارد کنید.",
+    )
+    r = await client.get("/panel/web/v1/_t/q", params={"page": "1", "flag": "maybe"})
+    assert r.json()["error"]["source"] == {"pointer": "/flag"}
+    assert r.json()["error"]["detail"] == "مقدار باید درست یا نادرست باشد."
+    r = await client.get("/panel/web/v1/_t/q")
+    assert r.json()["error"]["source"] == {"pointer": "/page"}
+    r = await client.get("/panel/web/v1/_t/item/nope")
+    assert r.json()["error"]["source"] == {"pointer": "/item_id"}
+
+
+def test_message_mapping_units() -> None:
+    assert persian_validation_message({"type": "string_too_short", "ctx": {"min_length": 1}}) == (
+        "این فیلد نباید خالی باشد."
+    )
+    assert persian_validation_message({"type": "too_short", "ctx": {"min_length": 12}}) == (
+        "دست‌کم ۱۲ مورد لازم است."
+    )
+    assert persian_validation_message({"type": "enum", "ctx": {}}) == "مقدار انتخاب‌شده مجاز نیست."
+    assert persian_validation_message({"type": "who_knows"}) == "مقدار واردشده معتبر نیست."
+    assert validation_pointer(("body",)) is None
+    assert validation_pointer(("body", 7)) is None
+    assert validation_pointer(("body", "a", 0, "b/c")) == "/a/0/b~1c"
+    assert validation_pointer(("query", "page")) == "/page"
+    assert validation_pointer(("path", "id")) == "/id"
+    assert validation_pointer(()) is None
+
+
+async def test_generic_401_code(app: FastAPI, client: httpx.AsyncClient) -> None:
+    from starlette.exceptions import HTTPException
+
+    @app.get("/panel/web/v1/_t/401")
+    async def unauth() -> None:
+        raise HTTPException(401)
+
+    r = await client.get("/panel/web/v1/_t/401")
+    assert r.json()["error"]["code"] == "NOT_AUTHENTICATED"
 
 
 async def test_api_error(app: FastAPI, client: httpx.AsyncClient) -> None:

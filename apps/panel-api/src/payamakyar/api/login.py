@@ -26,7 +26,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 from payamakyar.api.errors import ApiError
 from payamakyar.core.crypto import SecretBox, SecretBoxError
-from payamakyar.core.jalali import TEHRAN
+from payamakyar.core.jalali import TEHRAN, to_persian_digits
 from payamakyar.core.passwords import hash_password, password_problems
 from payamakyar.core.settings import PanelSettings
 from payamakyar.db.models import LoginEvent, User
@@ -109,18 +109,24 @@ def access_error(outcome: str) -> ApiError:
 
 
 async def check_new_password(s: AsyncSession, password: str, pointer: str) -> None:
-    """422 ``PASSWORD_TOO_LONG`` / ``PASSWORD_WEAK`` (detail: comma-joined problem codes)."""
+    """422 ``PASSWORD_TOO_LONG`` / ``PASSWORD_WEAK``.
+
+    The ``PASSWORD_WEAK`` detail is comma-joined problem codes; with ``TOO_SHORT`` it also
+    carries ``MIN_LENGTH:<n>`` (the current ``auth.password_min_length``) for the page's copy.
+    """
     if len(password) > MAX_PASSWORD_LENGTH:
         raise ApiError(
             422,
             "PASSWORD_TOO_LONG",
             "رمز عبور بیش از حد طولانی است",
-            f"رمز عبور نباید بیش از {MAX_PASSWORD_LENGTH} نویسه باشد.",
+            f"رمز عبور نباید بیش از {to_persian_digits(str(MAX_PASSWORD_LENGTH))} نویسه باشد.",
             pointer,
         )
     min_length = int(await SettingsStore(s).get("auth.password_min_length"))
     problems = password_problems(password, min_length)
     if problems:
+        if "TOO_SHORT" in problems:
+            problems = [*problems, f"MIN_LENGTH:{min_length}"]
         raise ApiError(422, "PASSWORD_WEAK", "رمز عبور ضعیف است", ",".join(problems), pointer)
 
 
