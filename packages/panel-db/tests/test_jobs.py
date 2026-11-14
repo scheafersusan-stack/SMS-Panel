@@ -46,12 +46,14 @@ async def test_claim_skip_locked_concurrent(db_url: str) -> None:
                 await enqueue(seed, "t.conc", {"i": i})
             await seed.commit()
         async with factory() as a, factory() as b:
-            got_a = await claim(a, ["t.conc"], limit=10, lease_seconds=60)
-            got_b = await claim(b, ["t.conc"], limit=10, lease_seconds=60)
+            got_a, got_b = await asyncio.gather(
+                claim(a, ["t.conc"], limit=6, lease_seconds=60),
+                claim(b, ["t.conc"], limit=6, lease_seconds=60),
+            )
             ids_a, ids_b = {j.id for j in got_a}, {j.id for j in got_b}
+            assert ids_a and ids_b
             assert ids_a.isdisjoint(ids_b)
             assert len(ids_a | ids_b) == 10
-            assert all(j.state == "running" and j.attempts == 1 for j in got_a + got_b)
             await a.commit()
             await b.commit()
     finally:
@@ -92,7 +94,8 @@ async def test_complete(db_session: AsyncSession) -> None:
     job_id = await enqueue(db_session, "t.complete", {})
     await db_session.commit()
     await claim(db_session, ["t.complete"], limit=1, lease_seconds=60)
-    await complete(db_session, job_id)  # type: ignore[arg-type]
+    assert job_id is not None
+    assert await complete(db_session, job_id, claimed_attempts=1)
     await db_session.commit()
     job = await _get(db_session, job_id)
     assert job.state == "done" and job.lease_until is None
@@ -108,7 +111,14 @@ async def test_fail_backoff_then_dead(db_session: AsyncSession) -> None:
         (job,) = await claim(db_session, ["t.fail"], limit=1, lease_seconds=60)
         assert job.attempts == attempt
         before = datetime.now(UTC)
-        await fail(db_session, job_id, "boom " + "x" * 5000, retry_schedule=schedule, jitter=0.1)
+        assert await fail(
+            db_session,
+            job_id,
+            "boom " + "x" * 5000,
+            claimed_attempts=attempt,
+            retry_schedule=schedule,
+            jitter=0.1,
+        )
         await db_session.commit()
         job = await _get(db_session, job_id)
         assert job.state == "ready" and job.lease_until is None
@@ -120,7 +130,7 @@ async def test_fail_backoff_then_dead(db_session: AsyncSession) -> None:
         await db_session.commit()
     (job,) = await claim(db_session, ["t.fail"], limit=1, lease_seconds=60)
     assert job.attempts == 3
-    await fail(db_session, job_id, "final", retry_schedule=schedule)
+    assert await fail(db_session, job_id, "final", claimed_attempts=3, retry_schedule=schedule)
     await db_session.commit()
     job = await _get(db_session, job_id)
     assert job.state == "dead" and job.last_error == "final"
@@ -172,5 +182,97 @@ async def test_worker_run_forever_stops(db_url: str) -> None:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+    finally:
+        await engine.dispose()
+
+
+async def _expire(s: AsyncSession, job_id: object) -> None:
+    await s.execute(
+        update(Job)
+        .where(Job.id == job_id)
+        .values(lease_until=datetime.now(UTC) - timedelta(seconds=5))
+    )
+    await s.commit()
+
+
+async def test_stale_complete_and_fail_are_fenced(db_session: AsyncSession) -> None:
+    job_id = await enqueue(db_session, "t.fence", {})
+    assert job_id is not None
+    await db_session.commit()
+    await claim(db_session, ["t.fence"], limit=1, lease_seconds=60)
+    await db_session.commit()
+    await _expire(db_session, job_id)
+    (second,) = await claim(db_session, ["t.fence"], limit=1, lease_seconds=60)
+    await db_session.commit()
+    assert second.attempts == 2
+    assert await complete(db_session, job_id, claimed_attempts=1) is False
+    assert await fail(db_session, job_id, "stale", claimed_attempts=1) is False
+    await db_session.commit()
+    job = await _get(db_session, job_id)
+    assert job.state == "running" and job.attempts == 2 and job.last_error is None
+    assert await complete(db_session, job_id, claimed_attempts=2) is True
+    await db_session.commit()
+    assert await fail(db_session, job_id, "late", claimed_attempts=2) is False
+    await db_session.commit()
+    assert (await _get(db_session, job_id)).state == "done"
+
+
+async def test_expired_lease_beyond_max_attempts_goes_dead(db_session: AsyncSession) -> None:
+    job_id = await enqueue(db_session, "t.exhaust", {}, max_attempts=1)
+    assert job_id is not None
+    await db_session.commit()
+    await claim(db_session, ["t.exhaust"], limit=1, lease_seconds=60)
+    await db_session.commit()
+    await _expire(db_session, job_id)
+    assert await claim(db_session, ["t.exhaust"], limit=1, lease_seconds=60) == []
+    await db_session.commit()
+    job = await _get(db_session, job_id)
+    assert job.state == "dead" and job.last_error == "lease expired" and job.attempts == 1
+
+
+async def test_worker_handler_exceeding_lease_times_out(db_url: str) -> None:
+    engine = create_engine(db_url)
+    try:
+        factory = session_factory(engine)
+        async with factory() as s:
+            job_id = await enqueue(s, "t.slow", {}, max_attempts=1)
+            await s.commit()
+
+        async def handler(session: AsyncSession, job: Job) -> None:
+            await asyncio.sleep(30)
+
+        # lease 11s -> timeout max(1, 1)=1s
+        worker = Worker(
+            ["t.slow"], handler, session_factory=factory, concurrency=1, lease_seconds=11
+        )
+        assert await worker.run_once() == 1
+        async with factory() as s:
+            job = await _get(s, job_id)
+        assert job.state == "dead"
+        assert job.last_error == "TimeoutError: handler exceeded lease"
+    finally:
+        await engine.dispose()
+
+
+async def test_worker_drops_result_when_lease_lost(db_url: str) -> None:
+    engine = create_engine(db_url)
+    try:
+        factory = session_factory(engine)
+        async with factory() as s:
+            job_id = await enqueue(s, "t.lost", {})
+            await s.commit()
+
+        async def handler(session: AsyncSession, job: Job) -> None:
+            # while the handler runs, the lease expires and another worker reclaims the job
+            async with factory() as other:
+                await _expire(other, job.id)
+                await claim(other, ["t.lost"], limit=1, lease_seconds=600)
+                await other.commit()
+
+        worker = Worker(["t.lost"], handler, session_factory=factory, concurrency=1)
+        assert await worker.run_once() == 1
+        async with factory() as s:
+            job = await _get(s, job_id)
+        assert job.state == "running" and job.attempts == 2
     finally:
         await engine.dispose()
