@@ -3,7 +3,8 @@
 ``record`` never commits: the audit row commits or rolls back with the caller's transaction.
 Each row's ``hash`` is ``sha256(prev_hash + canonical_json(row))`` so any edit, reordering or
 deletion of stored rows is detectable with ``verify_chain``. A database trigger (migration
-0002) additionally rejects UPDATE, DELETE and TRUNCATE.
+0002) additionally rejects UPDATE, DELETE and TRUNCATE. Deleting the newest rows is not
+detectable by the chain alone (no later row exposes the gap); anchor the latest hash externally.
 """
 
 import hashlib
@@ -67,12 +68,30 @@ def compute_hash(
     return hashlib.sha256((prev_hash + body).encode("utf-8")).hexdigest()
 
 
+def _normalise(value: Any) -> Any:
+    """Reduce to what jsonb returns: floats become text (jsonb numeric would alter them),
+    NUL characters are dropped (jsonb rejects them), unknown types become text."""
+    if isinstance(value, dict):
+        return {_normalise(str(k)): _normalise(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_normalise(v) for v in value]
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    return _normalise(str(value))
+
+
 def _clean(value: dict[str, Any] | None) -> dict[str, Any] | None:
     """Redact secrets and reduce to plain JSON types so the stored row hashes identically."""
     if value is None:
         return None
-    cleaned: dict[str, Any] = json.loads(json.dumps(redact(value), default=str))
+    cleaned: dict[str, Any] = _normalise(redact(value))
     return cleaned
+
+
+def _clean_text(value: str | None) -> str | None:
+    return None if value is None else str(_normalise(redact(value)))
 
 
 async def record(
@@ -87,6 +106,7 @@ async def record(
     after: dict[str, Any] | None = None,
     reason: str | None = None,
 ) -> int:
+    target_id, reason = _clean_text(target_id), _clean_text(reason)
     await s.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": ADVISORY_LOCK_KEY})
     prev_hash = (
         await s.execute(select(AuditEvent.hash).order_by(AuditEvent.id.desc()).limit(1))
@@ -146,20 +166,13 @@ async def verify_chain(s: AsyncSession, *, since_id: int = 0) -> int | None:
         )
     ).scalar_one_or_none() or GENESIS_HASH
     last_id = since_id
+    cols = AuditEvent.__table__.c
     while True:
         rows = (
-            (
-                await s.execute(
-                    select(AuditEvent)
-                    .where(AuditEvent.id > last_id)
-                    .order_by(AuditEvent.id)
-                    .limit(BATCH_SIZE)
-                    .execution_options(populate_existing=True)
-                )
+            await s.execute(
+                select(*cols).where(cols.id > last_id).order_by(cols.id).limit(BATCH_SIZE)
             )
-            .scalars()
-            .all()
-        )
+        ).all()
         if not rows:
             return None
         for row in rows:
@@ -182,4 +195,3 @@ async def verify_chain(s: AsyncSession, *, since_id: int = 0) -> int | None:
                 return int(row.id)
             expected_prev = row.hash
         last_id = int(rows[-1].id)
-        s.expunge_all()

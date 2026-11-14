@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import itertools
 import uuid
 from collections.abc import AsyncIterator
 
@@ -134,11 +135,6 @@ async def _tamper_scenario(db_session: AsyncSession, db_url: str) -> None:
     await _tamper(plain, "UPDATE audit_events SET prev_hash = $2 WHERE id = $1", ids[2], "f" * 64)
     assert await verify_chain(db_session) == ids[2]
     assert await verify_chain(db_session, since_id=ids[2]) is None
-    # deleted row: the next row's link is broken
-    await _tamper(plain, "DELETE FROM audit_events WHERE id = $1", ids[1])
-    bad = await verify_chain(db_session)
-    assert bad is not None and bad <= ids[2]
-    assert await verify_chain(db_session, since_id=ids[2]) is None
 
 
 async def test_secrets_redacted_in_after(db_session: AsyncSession) -> None:
@@ -156,8 +152,8 @@ async def test_secrets_redacted_in_after(db_session: AsyncSession) -> None:
     assert "hunter2" not in str(row.after)
 
 
-async def test_concurrent_records_keep_chain(db_url: str) -> None:
-    engine = create_engine(db_url)
+async def test_concurrent_records_keep_chain(tamper_url: str) -> None:
+    engine = create_engine(tamper_url)
     try:
         maker = session_factory(engine)
 
@@ -168,6 +164,65 @@ async def test_concurrent_records_keep_chain(db_url: str) -> None:
 
         await asyncio.gather(*(one(i) for i in range(8)))
         async with maker() as s:
+            rows = (await s.execute(select(AuditEvent).order_by(AuditEvent.id))).scalars().all()
+            assert len(rows) == 8
+            assert rows[0].prev_hash == GENESIS_HASH
+            assert all(b.prev_hash == a.hash for a, b in itertools.pairwise(rows))
             assert await verify_chain(s) is None
     finally:
         await engine.dispose()
+
+
+async def test_deleted_middle_row_detected(tamper_url: str) -> None:
+    engine = create_engine(tamper_url)
+    try:
+        async with session_factory(engine)() as s:
+            ids = [await _rec(s, after={"n": i}) for i in range(5)]
+            await s.commit()
+            assert await verify_chain(s) is None
+            await _tamper(tamper_url, "DELETE FROM audit_events WHERE id = $1", ids[2])
+            assert await verify_chain(s) == ids[3]
+    finally:
+        await engine.dispose()
+
+
+async def test_jsonb_roundtrip_values_verify_clean(tamper_url: str) -> None:
+    engine = create_engine(tamper_url)
+    try:
+        async with session_factory(engine)() as s:
+            rid = await _rec(
+                s,
+                after={"v": 1e16, "z": -0.0, "n": float("nan"), "i": float("inf"), "s": "a\x00b"},
+                reason="r\x00x",
+            )
+            await s.commit()
+            row = await _row(s, rid)
+            assert row.after is not None and row.after["s"] == "ab"
+            assert await verify_chain(s) is None
+    finally:
+        await engine.dispose()
+
+
+async def test_reason_and_target_id_redacted(db_session: AsyncSession) -> None:
+    rid = await record(
+        db_session,
+        actor_id=None,
+        actor_ip=None,
+        action="t.r",
+        target_type="x",
+        target_id="09123456789",
+        reason="called 09121234567",
+    )
+    await db_session.commit()
+    row = await _row(db_session, rid)
+    assert row.target_id is not None and "09123456789" not in row.target_id
+    assert row.reason is not None and "09121234567" not in row.reason
+    assert await verify_chain(db_session, since_id=rid - 1) is None
+
+
+async def test_verify_keeps_session_identity_map(db_session: AsyncSession) -> None:
+    rid = await _rec(db_session)
+    await db_session.commit()
+    row = await _row(db_session, rid)
+    await verify_chain(db_session)
+    assert row in db_session
