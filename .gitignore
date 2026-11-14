@@ -1,0 +1,12 @@
+.superpowers/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.build/
+node_modules/
+apps/panel-web/dist/
+.env
