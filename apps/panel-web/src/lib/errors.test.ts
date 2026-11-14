@@ -25,6 +25,12 @@ describe("errorText", () => {
     expect(text).toContain("یک نویسهٔ ویژه مانند ! یا @");
     expect(text).not.toContain("یک رقم");
   });
+  it("uses the server's minimum length for TOO_SHORT", () => {
+    expect(errorText(err("PASSWORD_WEAK", "TOO_SHORT,NO_UPPER,MIN_LENGTH:12"))).toContain("دست‌کم ۱۲ نویسه");
+    expect(errorText(err("PASSWORD_WEAK", "TOO_SHORT,MIN_LENGTH:12"))).not.toContain("MIN_LENGTH");
+    expect(passwordProblemLabels("TOO_SHORT")).toEqual(["دست‌کم ۸ نویسه"]);
+    expect(passwordProblemLabels("TOO_SHORT,MIN_LENGTH:x")).toEqual(["دست‌کم ۸ نویسه"]);
+  });
   it("explains a too-early resend with Persian digits", () => {
     const e = new ApiError(429, "OTP_RESEND_TOO_SOON", "t", "x", "/mobile", 7);
     expect(errorText(e)).toBe("ارسال مجدد کد هنوز ممکن نیست؛ ۷ ثانیهٔ دیگر دوباره تلاش کنید.");

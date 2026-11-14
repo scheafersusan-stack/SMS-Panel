@@ -5,7 +5,7 @@ import { currentTheme, toggleTheme } from "@/lib/theme";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 
-export function Shell({ role, route, children }: { role: "user" | "admin"; route: string; children: ReactNode }) {
+export function Shell({ role, route, onLogout, children }: { role: "user" | "admin"; route: string; onLogout?: () => void; children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const [dark, setDark] = useState(false);
   useEffect(() => setDark(currentTheme() === "dark"), []); // eslint-disable-line react-hooks/set-state-in-effect
@@ -25,7 +25,7 @@ export function Shell({ role, route, children }: { role: "user" | "admin"; route
 
   return (
     <div className={`app${open ? " nav-open" : ""}`} id="shell">
-      <Sidebar role={role} route={route} onNavigate={() => setOpen(false)} />
+      <Sidebar role={role} route={route} onNavigate={() => setOpen(false)} onLogout={onLogout} />
       <div className="scrim-mobile" onClick={() => setOpen(false)} aria-hidden="true" />
       <div className="main">
         <Topbar

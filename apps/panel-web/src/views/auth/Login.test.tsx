@@ -5,7 +5,7 @@ import { jalaliDateTime } from "@/lib/format";
 import { HttpResponse, V1, apiError, http, server } from "@/test/msw";
 import { Login } from "./Login";
 
-const USER = { id: "u1", username: "maryam", kind: "individual", first_name: "مریم", last_name: "رضایی", company_name: null, mfa_method: "none" };
+const USER = { id: "u1", username: "maryam", kind: "person", first_name: "مریم", last_name: "رضایی", company_name: null, mfa_method: "none" };
 
 async function fillAndSubmit() {
   const user = userEvent.setup();

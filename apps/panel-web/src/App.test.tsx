@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { App } from "./App";
@@ -58,5 +58,45 @@ describe("auth guard", () => {
     render(<App />);
     expect(await screen.findByRole("heading", { level: 1, name: "احراز هویت" })).toBeInTheDocument();
     expect(screen.queryByText("دسترسی ندارید")).toBeNull();
+  });
+
+  it("signs out: POSTs logout, drops the cached user and stays on login", async () => {
+    let signedIn = true;
+    let logouts = 0;
+    server.use(
+      http.get(`${V1}/account/me`, () => (signedIn ? HttpResponse.json(CUSTOMER) : notAuthenticated())),
+      http.post(`${V1}/auth/logout`, () => {
+        logouts += 1;
+        signedIn = false;
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    window.location.hash = "#u-dashboard";
+    const user = userEvent.setup();
+    render(<App />);
+    const nav = await screen.findByRole("navigation", { name: "منوی اصلی" });
+    await user.click(within(nav).getByRole("button", { name: "خروج" }));
+    await waitFor(() => expect(window.location.hash).toBe("#auth-login"));
+    expect(logouts).toBe(1);
+    expect(await screen.findByRole("heading", { level: 1, name: "ورود به پنل" })).toBeInTheDocument();
+    // The stale signed-in user must not bounce the login screen back to the dashboard.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(window.location.hash).toBe("#auth-login");
+  });
+
+  it("sends you to login when a screen's call answers 401 NOT_AUTHENTICATED", async () => {
+    let expired = false;
+    server.use(
+      http.get(`${V1}/account/me`, () => (expired ? notAuthenticated() : HttpResponse.json(CUSTOMER))),
+      http.get(`${V1}/account/security`, () => {
+        expired = true; // the session ended after the guard's check
+        return notAuthenticated();
+      }),
+      http.get(`${V1}/account/sessions`, () => notAuthenticated()),
+    );
+    window.location.hash = "#u-profile";
+    render(<App />);
+    await waitFor(() => expect(window.location.hash).toBe("#auth-login"));
+    expect(await screen.findByRole("heading", { level: 1, name: "ورود به پنل" })).toBeInTheDocument();
   });
 });

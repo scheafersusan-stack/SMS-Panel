@@ -3,19 +3,25 @@ import { faDigits, jalaliDateTime } from "./format";
 
 export const GENERIC_ERROR = "خطایی رخ داد؛ دوباره تلاش کنید.";
 
+/** Fallback minimum when the server does not send MIN_LENGTH (the default policy). */
+const DEFAULT_MIN_LENGTH = 8;
+
 const PASSWORD_PROBLEMS: Record<string, string> = {
-  TOO_SHORT: "دست‌کم ۸ نویسه",
   NO_UPPER: "یک حرف بزرگ لاتین",
   NO_LOWER: "یک حرف کوچک لاتین",
   NO_DIGIT: "یک رقم",
   NO_SPECIAL: "یک نویسهٔ ویژه مانند ! یا @",
 };
 
-/** Persian labels for the comma-joined problem codes of a PASSWORD_WEAK detail. */
+/**
+ * Persian labels for the comma-joined problem codes of a PASSWORD_WEAK detail. With TOO_SHORT
+ * the server also sends `MIN_LENGTH:<n>` (the current policy), used for the length label.
+ */
 export function passwordProblemLabels(detail: string): string[] {
-  return detail
-    .split(",")
-    .map((c) => PASSWORD_PROBLEMS[c.trim()])
+  const codes = detail.split(",").map((c) => c.trim());
+  const min = codes.map((c) => /^MIN_LENGTH:(\d+)$/.exec(c)?.[1]).find((x) => x !== undefined);
+  return codes
+    .map((c) => (c === "TOO_SHORT" ? `دست‌کم ${faDigits(min ?? DEFAULT_MIN_LENGTH)} نویسه` : PASSWORD_PROBLEMS[c]))
     .filter((x): x is string => x !== undefined);
 }
 

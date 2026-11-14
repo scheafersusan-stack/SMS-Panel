@@ -2,7 +2,7 @@ import { NAV } from "@/nav";
 import { ROUTES, type Role } from "@/routes";
 import { Icon } from "@/ui/Icon";
 
-export function Sidebar({ role, route, onNavigate }: { role: "user" | "admin"; route: string; onNavigate: () => void }) {
+export function Sidebar({ role, route, onNavigate, onLogout }: { role: "user" | "admin"; route: string; onNavigate: () => void; onLogout?: () => void }) {
   const current = ROUTES[route]?.navParent ?? route;
   return (
     <nav className="ns-sidebar" id="main-nav" aria-label="منوی اصلی">
@@ -30,10 +30,17 @@ export function Sidebar({ role, route, onNavigate }: { role: "user" | "admin"; r
         </div>
       ))}
       <div className="side-foot">
-        <a className="ns-nav-item" href="#auth-login" onClick={onNavigate}>
+        <button
+          type="button"
+          className="ns-nav-item"
+          onClick={() => {
+            onNavigate();
+            onLogout?.();
+          }}
+        >
           <Icon name="logout" size={20} />
           خروج
-        </a>
+        </button>
       </div>
     </nav>
   );

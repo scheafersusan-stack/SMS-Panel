@@ -12,6 +12,7 @@ h1, h2, h3, h4 { text-wrap: balance; }
 .scrim-mobile { display: none; }
 .role-switch { flex: none; }
 .ns-nav-item { cursor: pointer; text-decoration: none; }
+button.ns-nav-item { width: 100%; border: 0; background: none; text-align: start; }
 .side-sec { display: flex; flex-direction: column; gap: 2px; }
 .side-foot { margin-top: auto; padding-top: 16px; display: flex; flex-direction: column; gap: 8px; }
 .ns-credit { text-decoration: none; }

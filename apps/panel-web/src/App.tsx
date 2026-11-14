@@ -2,9 +2,9 @@
 
 import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import { ApiError } from "@/lib/api";
+import { ApiError, V1, api, onUnauthenticated } from "@/lib/api";
 import { errorText } from "@/lib/errors";
-import { ME_KEY, afterLoginRoute, isStaff, rememberReturn, useMe } from "@/lib/session";
+import { ME_KEY, afterLoginRoute, clearReturn, isStaff, rememberReturn, useMe } from "@/lib/session";
 import { Alert, EmptyState, Skeleton } from "@/ui/Feedback";
 import { DEFAULT_ROUTE, ROUTES, routeFromHash } from "@/routes";
 import { Shell } from "@/shell/Shell";
@@ -41,6 +41,8 @@ function screenFor(route: string) {
   }
 }
 
+const ME_PATH = `${V1}/account/me`;
+
 /** Routes whose screen needs a signed-in user (everything but the auth screens). */
 function Guarded({ route, role, children }: { route: string; role: "user" | "admin"; children: ReactNode }) {
   const client = useQueryClient();
@@ -57,6 +59,27 @@ function Guarded({ route, role, children }: { route: string; role: "user" | "adm
       window.location.hash = "#auth-login";
     }
   }, [unauthenticated, route]);
+  // Any other call finding the session gone drops the cached user: the guard re-checks and redirects.
+  useEffect(
+    () =>
+      onUnauthenticated((path) => {
+        if (path !== ME_PATH) void client.resetQueries({ queryKey: ME_KEY });
+      }),
+    [client],
+  );
+
+  async function logout() {
+    try {
+      await api("POST", `${V1}/auth/logout`);
+    } catch {
+      // Already signed out (401) or offline: the local sign-out below still happens.
+    }
+    clearReturn();
+    // Navigate first, then drop every cached answer in the same tick, so the login screen
+    // mounts with an empty cache and never sees the old user.
+    window.location.hash = "#auth-login";
+    client.clear();
+  }
 
   let body: ReactNode;
   if (me.data) {
@@ -67,7 +90,7 @@ function Guarded({ route, role, children }: { route: string; role: "user" | "adm
     body = <Skeleton height={160} />;
   }
   return (
-    <Shell role={role} route={route}>
+    <Shell role={role} route={route} onLogout={() => void logout()}>
       {body}
     </Shell>
   );

@@ -10,7 +10,7 @@ import { Stepper } from "@/ui/Nav";
 import { TextField } from "@/ui/TextField";
 import { AuthCard, CodeField, FormAlert, PASSWORD_HELP, ResendRow, goAfterLogin } from "./parts";
 
-type Kind = "individual" | "company";
+type Kind = "person" | "company";
 type Errors = Record<string, ReactNode>;
 
 const STEPS = ["موبایل", "کد تأیید", "اطلاعات حساب"];
@@ -21,7 +21,7 @@ const RENDERED: string[][] = [["mobile"], ["code"], ["first_name", "last_name", 
 
 export function Register() {
   const [step, setStep] = useState(0);
-  const [kind, setKind] = useState<Kind>("individual");
+  const [kind, setKind] = useState<Kind>("person");
   const [mobile, setMobile] = useState("");
   const [challenge, setChallenge] = useState("");
   const [code, setCode] = useState("");
@@ -105,7 +105,7 @@ export function Register() {
     e.preventDefault();
     const missing: Errors = {};
     if (!form.first_name.trim()) missing.first_name = "این فیلد الزامی است.";
-    if (kind === "individual" && !form.last_name.trim()) missing.last_name = "این فیلد الزامی است.";
+    if (kind === "person" && !form.last_name.trim()) missing.last_name = "این فیلد الزامی است.";
     if (kind === "company" && !form.company_name.trim()) missing.company_name = "این فیلد الزامی است.";
     if (!form.username.trim()) missing.username = "این فیلد الزامی است.";
     if (!form.password) missing.password = "این فیلد الزامی است.";
@@ -121,7 +121,7 @@ export function Register() {
         password: form.password,
         first_name: form.first_name.trim(),
       };
-      if (kind === "individual") body.last_name = form.last_name.trim();
+      if (kind === "person") body.last_name = form.last_name.trim();
       else body.company_name = form.company_name.trim();
       if (form.email.trim()) body.email = form.email.trim();
       await api("POST", `${V1}/auth/register/complete`, body);
@@ -140,7 +140,7 @@ export function Register() {
               نوع حساب
             </span>
             <div className="ns-seg" role="group" aria-labelledby="kind-label">
-              <button type="button" aria-pressed={kind === "individual"} onClick={() => setKind("individual")}>
+              <button type="button" aria-pressed={kind === "person"} onClick={() => setKind("person")}>
                 حقیقی
               </button>
               <button type="button" aria-pressed={kind === "company"} onClick={() => setKind("company")}>
@@ -173,7 +173,7 @@ export function Register() {
         <form className="stack" noValidate onSubmit={complete}>
           <div className="form-grid">
             <TextField label={kind === "company" ? "نام نماینده" : "نام"} autoComplete="given-name" value={form.first_name} error={errors.first_name} onChange={set("first_name")} />
-            {kind === "individual" ? (
+            {kind === "person" ? (
               <TextField label="نام خانوادگی" autoComplete="family-name" value={form.last_name} error={errors.last_name} onChange={set("last_name")} />
             ) : (
               <TextField label="نام شرکت" autoComplete="organization" value={form.company_name} error={errors.company_name} onChange={set("company_name")} />

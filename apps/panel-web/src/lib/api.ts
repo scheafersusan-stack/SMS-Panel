@@ -28,6 +28,17 @@ export class ApiError extends Error {
 
 const SAFE = new Set(["GET", "HEAD", "OPTIONS"]);
 
+type UnauthenticatedListener = (path: string) => void;
+const unauthenticatedListeners = new Set<UnauthenticatedListener>();
+
+/** Called with the request path whenever any call answers 401 NOT_AUTHENTICATED (the session is gone). */
+export function onUnauthenticated(listener: UnauthenticatedListener): () => void {
+  unauthenticatedListeners.add(listener);
+  return () => {
+    unauthenticatedListeners.delete(listener);
+  };
+}
+
 export function csrfToken(): string | null {
   for (const part of document.cookie.split("; ")) {
     if (part.startsWith("pk_csrf=")) return decodeURIComponent(part.slice("pk_csrf=".length));
@@ -70,6 +81,7 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
     }
     if (isEnvelope(parsed)) {
       const e = parsed.error;
+      if (res.status === 401 && e.code === "NOT_AUTHENTICATED") unauthenticatedListeners.forEach((l) => l(path));
       const wait = Number(res.headers.get("Retry-After"));
       throw new ApiError(res.status, e.code, e.title, e.detail, e.source?.pointer ?? null, Number.isInteger(wait) && wait > 0 ? wait : null);
     }

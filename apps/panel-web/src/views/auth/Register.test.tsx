@@ -11,7 +11,7 @@ async function toCodeStep(user: ReturnType<typeof userEvent.setup>, mobile = "09
 }
 
 describe("Register", () => {
-  it("walks the three steps for an individual and lands on the dashboard", async () => {
+  it("walks the three steps for a person and lands on the dashboard", async () => {
     let start: unknown;
     let complete: unknown;
     server.use(
@@ -28,7 +28,7 @@ describe("Register", () => {
     render(<Register />);
     expect(screen.getByRole("button", { name: "حقیقی" })).toHaveAttribute("aria-pressed", "true");
     const code = await toCodeStep(user, "۰۹۱۲۳۴۵۶۷۸۹");
-    expect(start).toEqual({ mobile: "09123456789", kind: "individual" });
+    expect(start).toEqual({ mobile: "09123456789", kind: "person" });
     await user.type(code, "۱۲۳۴۵۶");
     await user.click(screen.getByRole("button", { name: "ادامه" }));
     await user.type(await screen.findByLabelText("نام"), "مریم");
