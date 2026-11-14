@@ -214,6 +214,28 @@ def upgrade() -> None:
 def downgrade() -> None:
     conn = op.get_bind()
     for name in ROLES:
+        if name == "customer":
+            # Created by registration before this migration: keep the row and its assignments.
+            conn.execute(
+                sa.text(
+                    "DELETE FROM role_permissions WHERE role_id IN "
+                    "(SELECT id FROM roles WHERE name = :n)"
+                ),
+                {"n": name},
+            )
+            continue
+        used = conn.execute(
+            sa.text(
+                "SELECT count(*) FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
+                "WHERE r.name = :n"
+            ),
+            {"n": name},
+        ).scalar_one()
+        if used:
+            raise RuntimeError(
+                f"cannot downgrade 0003: role {name!r} is still assigned to {used} user(s); "
+                "unassign it first"
+            )
         conn.execute(sa.text("DELETE FROM roles WHERE name = :n"), {"n": name})
     for code, _, _ in PERMISSIONS:
         conn.execute(sa.text("DELETE FROM permissions WHERE code = :c"), {"c": code})

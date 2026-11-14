@@ -68,6 +68,64 @@ async def test_upgrade_and_downgrade_clean(pg_url: str) -> None:
         await _drop_db(pg_url, name)
 
 
+async def _fetch(url: str, sql: str, *args: object) -> list[asyncpg.Record]:
+    conn = await asyncpg.connect(url)
+    try:
+        return list(await conn.fetch(sql, *args))
+    finally:
+        await conn.close()
+
+
+async def _add_user(url: str, role: str) -> None:
+    conn = await asyncpg.connect(url)
+    try:
+        uid = uuid.uuid4()
+        await conn.execute(
+            "INSERT INTO users (id, username, mobile, password_hash) VALUES ($1, $2, $3, 'x')",
+            uid,
+            f"u_{uid.hex[:8]}",
+            f"0912{uid.int % 10**7:07d}",
+        )
+        await conn.execute(
+            "INSERT INTO user_roles (user_id, role_id) SELECT $1, id FROM roles WHERE name = $2",
+            uid,
+            role,
+        )
+    finally:
+        await conn.close()
+
+
+async def test_downgrade_keeps_customer_role_and_assignments(pg_url: str) -> None:
+    name = f"pk_test_migr_{uuid.uuid4().hex[:12]}"
+    url = await _make_db(pg_url, name)
+    try:
+        await asyncio.to_thread(migrate.upgrade, url, "head")
+        await _add_user(url, "customer")
+        await asyncio.to_thread(migrate.downgrade, url, "0002")
+        roles = await _fetch(url, "SELECT name FROM roles")
+        assert [r["name"] for r in roles] == ["customer"]
+        assert len(await _fetch(url, "SELECT 1 FROM user_roles")) == 1
+        assert await _fetch(url, "SELECT 1 FROM role_permissions") == []
+        assert await _fetch(url, "SELECT 1 FROM permissions") == []
+        await asyncio.to_thread(migrate.upgrade, url, "head")
+        assert len(await _fetch(url, "SELECT 1 FROM user_roles")) == 1
+    finally:
+        await _drop_db(pg_url, name)
+
+
+async def test_downgrade_refuses_when_staff_role_in_use(pg_url: str) -> None:
+    name = f"pk_test_migr_{uuid.uuid4().hex[:12]}"
+    url = await _make_db(pg_url, name)
+    try:
+        await asyncio.to_thread(migrate.upgrade, url, "head")
+        await _add_user(url, "staff_support")
+        with pytest.raises(Exception, match="staff_support"):
+            await asyncio.to_thread(migrate.downgrade, url, "0002")
+        assert len(await _fetch(url, "SELECT 1 FROM user_roles")) == 1
+    finally:
+        await _drop_db(pg_url, name)
+
+
 def test_models_match_migration(db_url: str) -> None:
     diffs = asyncio.run(_diff(db_url))
     assert diffs == []

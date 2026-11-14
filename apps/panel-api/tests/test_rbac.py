@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from sqlalchemy import select
 
 from payamakyar.api import sessions
-from payamakyar.api.deps import require
+from payamakyar.api.deps import admin_gate, require
 from payamakyar.core.passwords import hash_password
 from payamakyar.core.permissions import (
     CUSTOMER_SIDE_CODES,
@@ -173,22 +173,34 @@ async def test_require_dependency(app: FastAPI) -> None:
     assert r.status_code == 403 and _err(r) == "FORBIDDEN"
 
 
-async def test_every_admin_route_is_behind_the_gate(app: FastAPI) -> None:
-    """Probe every documented admin operation with a customer: the router gate answers first."""
+def test_every_admin_route_is_behind_the_gate(app: FastAPI) -> None:
+    def calls(dependant: Any) -> set[Any]:
+        found = {dependant.call}
+        for d in dependant.dependencies:
+            found |= calls(d)
+        return found
+
+    contexts = [
+        ctx
+        for top in app.routes
+        for ctx in (
+            top.effective_route_contexts() if hasattr(top, "effective_route_contexts") else []
+        )
+        if ctx.path.startswith("/panel/admin/v1")
+    ]
+    assert len(contexts) >= 6
+    for ctx in contexts:
+        assert admin_gate in calls(ctx.dependant), ctx.path
+
+
+async def test_gate_answers_before_route_logic(app: FastAPI) -> None:
     _, customer = await _make(app, ["customer"])
     _, staff_nomfa = await _make(app, ["staff_support"], mfa="none")
-    probed = 0
-    for path, ops in app.openapi()["paths"].items():
-        if not path.startswith("/panel/admin/v1"):
-            continue
-        url = path.replace("{role_id}", str(uuid.uuid4())).replace("{user_id}", str(uuid.uuid4()))
-        for method in ops:
-            r = await customer.request(method, url)
-            assert (r.status_code, _err(r)) == (403, "FORBIDDEN"), (method, path)
-            r = await staff_nomfa.request(method, url)
-            assert (r.status_code, _err(r)) == (403, "MFA_REQUIRED"), (method, path)
-            probed += 1
-    assert probed >= 6
+    for method, url in (("GET", ROLES), ("POST", ROLES), ("DELETE", f"{ROLES}/{uuid.uuid4()}")):
+        r = await customer.request(method, url)
+        assert (r.status_code, _err(r)) == (403, "FORBIDDEN"), (method, url)
+        r = await staff_nomfa.request(method, url)
+        assert (r.status_code, _err(r)) == (403, "MFA_REQUIRED"), (method, url)
 
 
 async def test_list_permissions_and_roles(app: FastAPI) -> None:
@@ -213,7 +225,6 @@ async def test_role_crud_with_audit(app: FastAPI) -> None:
     body: dict[str, Any] = {
         "code": "staff_kyc_lite",
         "title_fa": "کارشناس احراز",
-        "is_staff": True,
         "permissions": ["users.view", "kyc.review"],
     }
     r = await c.post(ROLES, json=body)
@@ -233,7 +244,7 @@ async def test_role_crud_with_audit(app: FastAPI) -> None:
 
     r = await c.put(
         f"{ROLES}/{role['id']}",
-        json={"title_fa": "کارشناس احراز ۲", "is_staff": True, "permissions": ["users.view"]},
+        json={"title_fa": "کارشناس احراز ۲", "permissions": ["users.view"]},
     )
     assert r.status_code == 200, r.text
     assert r.json()["permissions"] == ["users.view"]
@@ -280,7 +291,7 @@ async def test_system_roles_protected(app: FastAPI) -> None:
     reduced = [p for p in admin["permissions"] if p != "settings.manage"]
     r = await c.put(
         f"{ROLES}/{admin['id']}",
-        json={"title_fa": admin["title_fa"], "is_staff": True, "permissions": reduced},
+        json={"title_fa": admin["title_fa"], "permissions": reduced},
     )
     assert r.status_code == 409 and _err(r) == "ADMIN_ROLE_PROTECTED"
     # other system roles may be tuned; admin keeps the full set and may be retitled
@@ -288,7 +299,6 @@ async def test_system_roles_protected(app: FastAPI) -> None:
         f"{ROLES}/{admin['id']}",
         json={
             "title_fa": "مدیر کل",
-            "is_staff": True,
             "permissions": admin["permissions"],
         },
     )
@@ -352,18 +362,127 @@ async def test_last_admin_cannot_lose_admin(app: FastAPI) -> None:
         await s.execute(UserRole.__table__.delete().where(UserRole.role_id == admin_rid))  # type: ignore[attr-defined]
         await s.commit()
     me, c = await _make(app, ["admin"])
-    # a delegate with roles.manage but not admin tries to strip the only admin
     r = await c.post(
         ROLES,
         json={"code": "role_managers2", "title_fa": "مدیر نقش", "permissions": ["roles.manage"]},
     )
     assert r.status_code == 201
-    _mgr, mc = await _make(app, ["role_managers2"])
-    r = await mc.put(f"/panel/admin/v1/users/{me.id}/roles", json={"roles": ["customer"]})
+    url = f"/panel/admin/v1/users/{me.id}/roles"
+    r = await c.put(url, json={"roles": ["role_managers2"]})
     assert r.status_code == 409 and _err(r) == "LAST_ADMIN_REQUIRED"
     assert await _role_names(app, me.id) == {"admin"}
-    # with a second admin it works
     other, _ = await _make(app, ["admin"])
-    r = await mc.put(f"/panel/admin/v1/users/{me.id}/roles", json={"roles": ["customer"]})
+    r = await c.put(url, json={"roles": ["role_managers2"]})
     assert r.status_code == 200
     assert await _role_names(app, other.id) == {"admin"}
+
+
+async def _delegate(
+    app: FastAPI, admin: httpx.AsyncClient, code: str
+) -> tuple[User, httpx.AsyncClient]:
+    r = await admin.post(
+        ROLES, json={"code": code, "title_fa": "مدیر نقش", "permissions": ["roles.manage"]}
+    )
+    assert r.status_code == 201, r.text
+    return await _make(app, [code])
+
+
+async def test_delegate_cannot_escalate(app: FastAPI) -> None:
+    _, admin_c = await _make(app, ["admin"])
+    victim_admin, _ = await _make(app, ["admin"])
+    me, dc = await _delegate(app, admin_c, "delegate_a")
+    roles = {i["code"]: i for i in (await dc.get(ROLES)).json()["items"]}
+    me_id = me.id
+
+    def forbidden(r: httpx.Response) -> bool:
+        return r.status_code == 403 and _err(r) == "FORBIDDEN"
+
+    # self-assign admin
+    r = await dc.put(
+        f"/panel/admin/v1/users/{me_id}/roles", json={"roles": ["delegate_a", "admin"]}
+    )
+    assert forbidden(r) and r.json()["error"]["source"]["pointer"] == "/roles/1"
+    # create a role with every permission
+    r = await dc.post(
+        ROLES,
+        json={"code": "everything", "title_fa": "همه", "permissions": sorted(permission_codes())},
+    )
+    assert forbidden(r) and r.json()["error"]["source"]["pointer"].startswith("/permissions/")
+    # widen a system role
+    support = roles["staff_support"]
+    r = await dc.put(
+        f"{ROLES}/{support['id']}",
+        json={
+            "title_fa": support["title_fa"],
+            "permissions": [*support["permissions"], "users.edit"],
+        },
+    )
+    assert forbidden(r)
+    # edit a role holding permissions the delegate lacks (even without widening)
+    r = await dc.put(
+        f"{ROLES}/{support['id']}",
+        json={"title_fa": support["title_fa"], "permissions": []},
+    )
+    assert forbidden(r)
+    # demote an admin
+    r = await dc.put(f"/panel/admin/v1/users/{victim_admin.id}/roles", json={"roles": ["customer"]})
+    assert forbidden(r)
+    assert await _role_names(app, victim_admin.id) == {"admin"}
+    # but within its own permissions the delegate may manage
+    r = await dc.post(
+        ROLES, json={"code": "tiny", "title_fa": "کوچک", "permissions": ["roles.manage"]}
+    )
+    assert r.status_code == 201
+    # while admin can do all of the above
+    r = await admin_c.post(
+        ROLES,
+        json={"code": "everything", "title_fa": "همه", "permissions": sorted(permission_codes())},
+    )
+    assert r.status_code == 201
+    r = await admin_c.put(
+        f"/panel/admin/v1/users/{victim_admin.id}/roles", json={"roles": ["customer"]}
+    )
+    assert r.status_code == 200
+
+
+async def test_update_role_cannot_remove_own_roles_manage(app: FastAPI) -> None:
+    _, admin_c = await _make(app, ["admin"])
+    r = await admin_c.post(
+        ROLES,
+        json={
+            "code": "rm_holder",
+            "title_fa": "نگهدار",
+            "permissions": ["roles.manage", "users.view"],
+        },
+    )
+    role = r.json()
+    _, c = await _make(app, ["rm_holder"])
+    r = await c.put(
+        f"{ROLES}/{role['id']}", json={"title_fa": "نگهدار", "permissions": ["users.view"]}
+    )
+    assert r.status_code == 409 and _err(r) == "WOULD_LOCK_YOU_OUT"
+    assert r.json()["error"]["source"]["pointer"] == "/permissions"
+    r = await c.put(
+        f"{ROLES}/{role['id']}",
+        json={"title_fa": "نگهدار", "permissions": ["roles.manage"]},
+    )
+    assert r.status_code == 200
+    assert r.json()["is_staff"] is True
+
+
+async def test_is_staff_is_derived(app: FastAPI) -> None:
+    _, c = await _make(app, ["admin"])
+    r = await c.post(
+        ROLES, json={"code": "cust_like", "title_fa": "مشتری‌گونه", "permissions": ["send.single"]}
+    )
+    assert r.status_code == 201 and r.json()["is_staff"] is False
+    r = await c.post(
+        ROLES,
+        json={
+            "code": "x_staff",
+            "title_fa": "کارمند",
+            "permissions": ["send.single"],
+            "is_staff": True,
+        },
+    )
+    assert r.status_code == 422

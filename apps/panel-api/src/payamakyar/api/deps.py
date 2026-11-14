@@ -141,8 +141,10 @@ async def user_permissions(user: CurrentUser, s: SessionDep) -> frozenset[str]:
 Permissions = Annotated[frozenset[str], Depends(user_permissions)]
 
 
-def forbidden() -> ApiError:
-    return ApiError(403, "FORBIDDEN", "دسترسی مجاز نیست", "شما اجازه انجام این کار را ندارید.")
+def forbidden(
+    detail: str = "شما اجازه انجام این کار را ندارید.", pointer: str | None = None
+) -> ApiError:
+    return ApiError(403, "FORBIDDEN", "دسترسی مجاز نیست", detail, pointer)
 
 
 async def admin_gate(user: CurrentUser, perms: Permissions) -> None:

@@ -9,9 +9,9 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from payamakyar.api.deps import CurrentUser, SessionDep, client_ip, require
+from payamakyar.api.deps import CurrentUser, Permissions, SessionDep, client_ip, forbidden, require
 from payamakyar.api.errors import ApiError, validation_failed
-from payamakyar.core.permissions import ADMIN_ROLE, SYSTEM_ROLES, permission_codes
+from payamakyar.core.permissions import ADMIN_ROLE, STAFF_CODES, SYSTEM_ROLES, permission_codes
 from payamakyar.db import audit
 from payamakyar.db.models import Permission, Role, RolePermission, User, UserRole
 
@@ -47,14 +47,12 @@ class RoleCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     code: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{2,31}$")]
     title_fa: Title
-    is_staff: bool = False
     permissions: list[str] = Field(default_factory=list, max_length=200)
 
 
 class RoleUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     title_fa: Title
-    is_staff: bool = False
     permissions: list[str] = Field(default_factory=list, max_length=200)
 
 
@@ -69,7 +67,29 @@ class UserRolesOut(BaseModel):
 
 
 def _not_found(what: str) -> ApiError:
-    return ApiError(404, "NOT_FOUND", f"{what} یافت نشد")
+    return ApiError(404, "NOT_FOUND", f"{what} یافت نشد", f"{what} مورد نظر وجود ندارد.")
+
+
+def _is_staff(codes: list[str]) -> bool:
+    return any(c in STAFF_CODES for c in codes)
+
+
+def _is_full(perms: frozenset[str]) -> bool:
+    """Admin-equivalent: holds every permission, so no delegation bound applies."""
+    return permission_codes() <= perms
+
+
+def _outside(actor_perms: frozenset[str], codes: list[str], pointer: str) -> ApiError:
+    return forbidden("شما نمی‌توانید دسترسی‌ای را مدیریت کنید که خودتان ندارید.", pointer=pointer)
+
+
+def _bound_new(actor_perms: frozenset[str], codes: list[str]) -> None:
+    """Every permission in ``codes`` must be one the actor holds (admin: no bound)."""
+    if _is_full(actor_perms):
+        return
+    for i, code in enumerate(codes):
+        if code not in actor_perms:
+            raise _outside(actor_perms, codes, f"/permissions/{i}")
 
 
 def _check_permissions(codes: list[str]) -> list[str]:
@@ -104,6 +124,23 @@ async def _out(s: AsyncSession, role: Role) -> RoleOut:
         is_staff=role.is_staff,
         is_system=role.name in SYSTEM_ROLES,
         permissions=await _role_permissions(s, role.id),
+    )
+
+
+async def _lock_admin_role(s: AsyncSession) -> uuid.UUID:
+    """Serialise role changes (last-admin and lock-out checks) on the admin role row."""
+    return (
+        await s.execute(select(Role.id).where(Role.name == ADMIN_ROLE).with_for_update())
+    ).scalar_one()
+
+
+def _lockout(pointer: str) -> ApiError:
+    return ApiError(
+        409,
+        "WOULD_LOCK_YOU_OUT",
+        "این تغییر دسترسی مدیریت نقش‌ها را از شما می‌گیرد",
+        "شما نمی‌توانید دسترسی خودتان به مدیریت نقش‌ها را حذف کنید.",
+        pointer,
     )
 
 
@@ -156,10 +193,15 @@ async def list_roles(s: SessionDep) -> RoleList:
 
 @router.post("/roles", status_code=201)
 async def create_role(
-    body: RoleCreate, request: Request, s: SessionDep, actor: CurrentUser
+    body: RoleCreate,
+    request: Request,
+    s: SessionDep,
+    actor: CurrentUser,
+    actor_perms: Permissions,
 ) -> RoleOut:
     codes = _check_permissions(body.permissions)
-    role = Role(name=body.code, title_fa=body.title_fa, is_staff=body.is_staff)
+    _bound_new(actor_perms, body.permissions)
+    role = Role(name=body.code, title_fa=body.title_fa, is_staff=_is_staff(codes))
     taken = ApiError(
         409, "ROLE_CODE_TAKEN", "این کد نقش قبلاً گرفته شده است", "کد دیگری انتخاب کنید.", "/code"
     )
@@ -187,10 +229,20 @@ async def create_role(
 
 @router.put("/roles/{role_id}")
 async def update_role(
-    role_id: uuid.UUID, body: RoleUpdate, request: Request, s: SessionDep, actor: CurrentUser
+    role_id: uuid.UUID,
+    body: RoleUpdate,
+    request: Request,
+    s: SessionDep,
+    actor: CurrentUser,
+    actor_perms: Permissions,
 ) -> RoleOut:
+    await _lock_admin_role(s)
     role = await _get_role(s, role_id, lock=True)
     codes = _check_permissions(body.permissions)
+    old_codes = await _role_permissions(s, role.id)
+    _bound_new(actor_perms, body.permissions)
+    if not _is_full(actor_perms) and not set(old_codes) <= actor_perms:
+        raise _outside(actor_perms, old_codes, "/permissions")
     if role.name == ADMIN_ROLE and set(codes) != permission_codes():
         raise ApiError(
             409,
@@ -199,9 +251,34 @@ async def update_role(
             "نقش مدیر کل باید همه دسترسی‌ها را داشته باشد.",
             "/permissions",
         )
-    before = _snapshot(role, await _role_permissions(s, role.id))
+    held = (
+        await s.execute(
+            select(UserRole.role_id).where(
+                UserRole.user_id == actor.id, UserRole.role_id != role.id
+            )
+        )
+    ).scalars()
+    kept = (
+        set(codes)
+        if (
+            await s.execute(
+                select(UserRole).where(UserRole.user_id == actor.id, UserRole.role_id == role.id)
+            )
+        ).first()
+        else set()
+    )
+    other = set(
+        (
+            await s.execute(
+                select(RolePermission.permission_code).where(RolePermission.role_id.in_(list(held)))
+            )
+        ).scalars()
+    )
+    if "roles.manage" in actor_perms and "roles.manage" not in kept | other:
+        raise _lockout("/permissions")
+    before = _snapshot(role, old_codes)
     role.title_fa = body.title_fa
-    role.is_staff = True if role.name == ADMIN_ROLE else body.is_staff
+    role.is_staff = _is_staff(codes)
     await s.execute(delete(RolePermission).where(RolePermission.role_id == role.id))
     s.add_all(RolePermission(role_id=role.id, permission_code=c) for c in codes)
     await s.flush()
@@ -268,7 +345,12 @@ async def _user_role_names(s: AsyncSession, user_id: uuid.UUID) -> list[str]:
 
 @router.put("/users/{user_id}/roles")
 async def set_user_roles(
-    user_id: uuid.UUID, body: UserRolesBody, request: Request, s: SessionDep, actor: CurrentUser
+    user_id: uuid.UUID,
+    body: UserRolesBody,
+    request: Request,
+    s: SessionDep,
+    actor: CurrentUser,
+    actor_perms: Permissions,
 ) -> UserRolesOut:
     target = await s.get(User, user_id)
     if target is None:
@@ -281,10 +363,27 @@ async def set_user_roles(
         if code not in found:
             raise validation_failed("نقش ناشناخته است.", f"/roles/{i}")
     # Serialise role changes so the last-admin check cannot race.
-    admin_role_id = (
-        await s.execute(select(Role.id).where(Role.name == ADMIN_ROLE).with_for_update())
-    ).scalar_one()
+    admin_role_id = await _lock_admin_role(s)
     before = await _user_role_names(s, user_id)
+    if not _is_full(actor_perms):
+        # Adding or removing a role is allowed only if its permissions are within the actor's.
+        changed = set(before) ^ set(wanted)
+        grants: dict[str, set[str]] = {}
+        for name, code in (
+            await s.execute(
+                select(Role.name, RolePermission.permission_code)
+                .join(RolePermission, RolePermission.role_id == Role.id)
+                .where(Role.name.in_(changed))
+            )
+        ).all():
+            grants.setdefault(name, set()).add(code)
+        for name in sorted(changed):
+            if not grants.get(name, set()) <= actor_perms:
+                index = body.roles.index(name) if name in body.roles else None
+                raise forbidden(
+                    "شما نمی‌توانید نقشی را که دسترسی‌های بیشتری از شما دارد تخصیص دهید یا بردارید.",
+                    pointer=f"/roles/{index}" if index is not None else "/roles",
+                )
     if actor.id == user_id:
         new_perms = set(
             (
@@ -296,13 +395,7 @@ async def set_user_roles(
             ).scalars()
         )
         if "roles.manage" not in new_perms:
-            raise ApiError(
-                409,
-                "WOULD_LOCK_YOU_OUT",
-                "این تغییر دسترسی مدیریت نقش‌ها را از شما می‌گیرد",
-                "شما نمی‌توانید دسترسی خودتان به مدیریت نقش‌ها را حذف کنید.",
-                "/roles",
-            )
+            raise _lockout("/roles")
     if ADMIN_ROLE in before and ADMIN_ROLE not in found:
         others = (
             await s.execute(
