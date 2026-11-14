@@ -24,6 +24,7 @@ class PanelSettings(BaseSettings):
     session_absolute_seconds: int = 43200
     csrf_cookie_name: str = "pk_csrf"
     session_cookie_name: str = "pk_session"
+    trusted_proxies: str = ""  # comma-separated CIDRs allowed to set X-Forwarded-For
 
     @model_validator(mode="after")
     def _check_prod(self) -> Self:
