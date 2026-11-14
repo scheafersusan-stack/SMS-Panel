@@ -9,7 +9,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from payamakyar.api.deps import CurrentUser, Permissions, SessionDep, client_ip, forbidden, require
+from payamakyar.api.deps import CurrentUser, SessionDep, client_ip, forbidden, require
 from payamakyar.api.errors import ApiError, validation_failed
 from payamakyar.core.permissions import ADMIN_ROLE, STAFF_CODES, SYSTEM_ROLES, permission_codes
 from payamakyar.db import audit
@@ -74,22 +74,22 @@ def _is_staff(codes: list[str]) -> bool:
     return any(c in STAFF_CODES for c in codes)
 
 
-def _is_full(perms: frozenset[str]) -> bool:
+def _is_full(perms: frozenset[str] | set[str]) -> bool:
     """Admin-equivalent: holds every permission, so no delegation bound applies."""
     return permission_codes() <= perms
 
 
-def _outside(actor_perms: frozenset[str], codes: list[str], pointer: str) -> ApiError:
+def _outside(pointer: str) -> ApiError:
     return forbidden("شما نمی‌توانید دسترسی‌ای را مدیریت کنید که خودتان ندارید.", pointer=pointer)
 
 
-def _bound_new(actor_perms: frozenset[str], codes: list[str]) -> None:
+def _bound_new(actor_perms: frozenset[str] | set[str], codes: list[str]) -> None:
     """Every permission in ``codes`` must be one the actor holds (admin: no bound)."""
     if _is_full(actor_perms):
         return
     for i, code in enumerate(codes):
         if code not in actor_perms:
-            raise _outside(actor_perms, codes, f"/permissions/{i}")
+            raise _outside(f"/permissions/{i}")
 
 
 def _check_permissions(codes: list[str]) -> list[str]:
@@ -132,6 +132,27 @@ async def _lock_admin_role(s: AsyncSession) -> uuid.UUID:
     return (
         await s.execute(select(Role.id).where(Role.name == ADMIN_ROLE).with_for_update())
     ).scalar_one()
+
+
+async def _locked_actor_perms(s: AsyncSession, actor: User) -> set[str]:
+    """Take the admin-row lock, then read the actor's permissions fresh.
+
+    The ``Permissions`` dependency ran before the lock; a concurrent change may have narrowed
+    the actor while this request waited, so all bounds use this re-read set.
+    """
+    await _lock_admin_role(s)
+    perms = set(
+        (
+            await s.execute(
+                select(RolePermission.permission_code)
+                .join(UserRole, UserRole.role_id == RolePermission.role_id)
+                .where(UserRole.user_id == actor.id)
+            )
+        ).scalars()
+    )
+    if "roles.manage" not in perms:
+        raise forbidden()
+    return perms
 
 
 def _lockout(pointer: str) -> ApiError:
@@ -197,9 +218,9 @@ async def create_role(
     request: Request,
     s: SessionDep,
     actor: CurrentUser,
-    actor_perms: Permissions,
 ) -> RoleOut:
     codes = _check_permissions(body.permissions)
+    actor_perms = await _locked_actor_perms(s, actor)
     _bound_new(actor_perms, body.permissions)
     role = Role(name=body.code, title_fa=body.title_fa, is_staff=_is_staff(codes))
     taken = ApiError(
@@ -234,15 +255,14 @@ async def update_role(
     request: Request,
     s: SessionDep,
     actor: CurrentUser,
-    actor_perms: Permissions,
 ) -> RoleOut:
-    await _lock_admin_role(s)
+    actor_perms = await _locked_actor_perms(s, actor)
     role = await _get_role(s, role_id, lock=True)
     codes = _check_permissions(body.permissions)
     old_codes = await _role_permissions(s, role.id)
     _bound_new(actor_perms, body.permissions)
     if not _is_full(actor_perms) and not set(old_codes) <= actor_perms:
-        raise _outside(actor_perms, old_codes, "/permissions")
+        raise _outside("/permissions")
     if role.name == ADMIN_ROLE and set(codes) != permission_codes():
         raise ApiError(
             409,
@@ -299,7 +319,10 @@ async def update_role(
 async def delete_role(
     role_id: uuid.UUID, request: Request, s: SessionDep, actor: CurrentUser
 ) -> Response:
+    actor_perms = await _locked_actor_perms(s, actor)
     role = await _get_role(s, role_id, lock=True)
+    if not _is_full(actor_perms) and not set(await _role_permissions(s, role.id)) <= actor_perms:
+        raise _outside("/role_id")
     if role.name in SYSTEM_ROLES:
         raise ApiError(
             409,
@@ -350,7 +373,6 @@ async def set_user_roles(
     request: Request,
     s: SessionDep,
     actor: CurrentUser,
-    actor_perms: Permissions,
 ) -> UserRolesOut:
     target = await s.get(User, user_id)
     if target is None:
@@ -363,6 +385,7 @@ async def set_user_roles(
         if code not in found:
             raise validation_failed("نقش ناشناخته است.", f"/roles/{i}")
     # Serialise role changes so the last-admin check cannot race.
+    actor_perms = await _locked_actor_perms(s, actor)
     admin_role_id = await _lock_admin_role(s)
     before = await _user_role_names(s, user_id)
     if not _is_full(actor_perms):

@@ -173,6 +173,24 @@ async def test_require_dependency(app: FastAPI) -> None:
     assert r.status_code == 403 and _err(r) == "FORBIDDEN"
 
 
+def _admin_route_dependants(app: FastAPI) -> list[tuple[str, Any]]:
+    """(path, dependant) of every admin route; falls back to walking nested routes when the
+    FastAPI internals (``effective_route_contexts``) are not available."""
+    found: list[tuple[str, Any]] = []
+
+    def walk(routes: Any, prefix: str = "") -> None:
+        for r in routes:
+            if hasattr(r, "effective_route_contexts"):
+                found.extend((c.path, c.dependant) for c in r.effective_route_contexts())
+            elif hasattr(r, "dependant"):
+                found.append((prefix + r.path, r.dependant))
+            elif hasattr(r, "routes"):
+                walk(r.routes, prefix + getattr(r, "path", ""))
+
+    walk(app.routes)
+    return [(p, d) for p, d in found if p.startswith("/panel/admin/v1")]
+
+
 def test_every_admin_route_is_behind_the_gate(app: FastAPI) -> None:
     def calls(dependant: Any) -> set[Any]:
         found = {dependant.call}
@@ -180,17 +198,10 @@ def test_every_admin_route_is_behind_the_gate(app: FastAPI) -> None:
             found |= calls(d)
         return found
 
-    contexts = [
-        ctx
-        for top in app.routes
-        for ctx in (
-            top.effective_route_contexts() if hasattr(top, "effective_route_contexts") else []
-        )
-        if ctx.path.startswith("/panel/admin/v1")
-    ]
-    assert len(contexts) >= 6
-    for ctx in contexts:
-        assert admin_gate in calls(ctx.dependant), ctx.path
+    routes = _admin_route_dependants(app)
+    assert len(routes) >= 6
+    for path, dependant in routes:
+        assert admin_gate in calls(dependant), path
 
 
 async def test_gate_answers_before_route_logic(app: FastAPI) -> None:
@@ -428,6 +439,15 @@ async def test_delegate_cannot_escalate(app: FastAPI) -> None:
     r = await dc.put(f"/panel/admin/v1/users/{victim_admin.id}/roles", json={"roles": ["customer"]})
     assert forbidden(r)
     assert await _role_names(app, victim_admin.id) == {"admin"}
+    # delete a role stronger than its own
+    strong = (
+        await admin_c.post(
+            ROLES, json={"code": "strong_one", "title_fa": "قوی", "permissions": ["users.edit"]}
+        )
+    ).json()
+    r = await dc.delete(f"{ROLES}/{strong['id']}")
+    assert forbidden(r) and r.json()["error"]["source"]["pointer"] == "/role_id"
+    assert (await admin_c.delete(f"{ROLES}/{strong['id']}")).status_code == 204
     # but within its own permissions the delegate may manage
     r = await dc.post(
         ROLES, json={"code": "tiny", "title_fa": "کوچک", "permissions": ["roles.manage"]}
