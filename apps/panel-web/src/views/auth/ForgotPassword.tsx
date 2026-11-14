@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, type FormEvent, type ReactNode } from "react";
-import { ApiError, api } from "@/lib/api";
+import { ApiError, V1, api } from "@/lib/api";
 import { useCountdown } from "@/lib/countdown";
-import { errorText, fieldPath } from "@/lib/errors";
+import { errorText, fieldPath, resendWait } from "@/lib/errors";
 import { formatMobile, latinDigits, normalizeMobile } from "@/lib/phone";
 import { Alert } from "@/ui/Feedback";
 import { Button, buttonClass } from "@/ui/Button";
@@ -11,7 +11,8 @@ import { Stepper } from "@/ui/Nav";
 import { TextField } from "@/ui/TextField";
 import { AuthCard, CodeField, FormAlert, PASSWORD_HELP, ResendRow } from "./parts";
 
-const V1 = "/panel/web/v1";
+/** Fields rendered on each step; an error for any other field is a form-level message. */
+const RENDERED: string[][] = [["mobile"], ["code", "new_password"]];
 const RESET_CODE_INVALID = "کد نامعتبر یا منقضی است؛ کد جدید بگیرید.";
 
 export function ForgotPassword() {
@@ -25,7 +26,7 @@ export function ForgotPassword() {
   const [busy, setBusy] = useState(false);
   const countdown = useCountdown();
 
-  async function run(work: () => Promise<void>) {
+  async function run(own: number, work: () => Promise<void>) {
     setErrors({});
     setFormError(null);
     setBusy(true);
@@ -35,7 +36,9 @@ export function ForgotPassword() {
       const path = fieldPath(err);
       // Every failed code (wrong, expired, used up) is the same answer by design.
       const msg = err instanceof ApiError && err.code === "OTP_INVALID" ? RESET_CODE_INVALID : errorText(err);
-      if (path === "mobile" || path === "code" || path === "new_password") setErrors({ [path]: msg });
+      const wait = resendWait(err);
+      if (wait) countdown.start(wait);
+      if (path && RENDERED[own]?.includes(path)) setErrors({ [path]: msg });
       else setFormError(msg);
     } finally {
       setBusy(false);
@@ -56,7 +59,7 @@ export function ForgotPassword() {
 
   const sendCode = (e: FormEvent) => {
     e.preventDefault();
-    void run(async () => {
+    void run(0, async () => {
       if (await requestCode()) setStep(1);
     });
   };
@@ -70,8 +73,10 @@ export function ForgotPassword() {
       setErrors(missing);
       return;
     }
-    void run(async () => {
+    void run(1, async () => {
       await api("POST", `${V1}/auth/reset/complete`, { challenge_id: challenge, code: latinDigits(code.trim()), new_password: password });
+      setPassword("");
+      setCode("");
       setStep(2);
     });
   };
@@ -97,7 +102,7 @@ export function ForgotPassword() {
             left={countdown.left}
             busy={busy}
             onResend={() =>
-              void run(async () => {
+              void run(1, async () => {
                 await requestCode();
                 setCode("");
               })

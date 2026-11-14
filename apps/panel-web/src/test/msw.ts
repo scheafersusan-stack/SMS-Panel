@@ -1,10 +1,8 @@
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
+import { V1 } from "@/lib/api";
 
-export { http, HttpResponse };
-
-/** Every user-panel API path starts here. */
-export const V1 = "/panel/web/v1";
+export { http, HttpResponse, V1 };
 
 /** The shared MSW server; tests install per-case handlers with `server.use(...)`. */
 export const server = setupServer();

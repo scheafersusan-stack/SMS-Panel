@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { jalaliDateTime } from "./format";
 import { ApiError } from "./api";
-import { GENERIC_ERROR, errorText, fieldPath, passwordProblemLabels } from "./errors";
+import { GENERIC_ERROR, errorText, fieldPath, passwordProblemLabels, resendWait } from "./errors";
 
 const err = (code: string, detail = "", pointer: string | null = null) => new ApiError(400, code, "t", detail, pointer);
 
@@ -24,6 +24,12 @@ describe("errorText", () => {
     expect(text).toContain("یک حرف بزرگ لاتین");
     expect(text).toContain("یک نویسهٔ ویژه مانند ! یا @");
     expect(text).not.toContain("یک رقم");
+  });
+  it("explains a too-early resend with Persian digits", () => {
+    const e = new ApiError(429, "OTP_RESEND_TOO_SOON", "t", "x", "/mobile", 7);
+    expect(errorText(e)).toBe("ارسال مجدد کد هنوز ممکن نیست؛ ۷ ثانیهٔ دیگر دوباره تلاش کنید.");
+    expect(resendWait(e)).toBe(7);
+    expect(resendWait(err("OTP_INVALID"))).toBeNull();
   });
   it("falls back to the server detail, then a generic line", () => {
     expect(errorText(err("SOMETHING_NEW", "جزئیات سرور"))).toBe("جزئیات سرور");

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { clock } from "@/lib/countdown";
+import { afterLoginRoute } from "@/lib/session";
 import { Alert } from "@/ui/Feedback";
 import { Button } from "@/ui/Button";
 import { Icon } from "@/ui/Icon";
@@ -64,6 +65,11 @@ export function ResendRow({ left, busy, onResend }: { left: number; busy?: boole
 
 export function goTo(route: string): void {
   window.location.hash = `#${route}`;
+}
+
+/** Signed in: back to the route the guard sent us away from, else the dashboard. */
+export function goAfterLogin(): void {
+  goTo(afterLoginRoute());
 }
 
 export const PASSWORD_HELP = "دست‌کم ۸ نویسه با حرف بزرگ و کوچک لاتین، رقم و یک نویسهٔ ویژه";

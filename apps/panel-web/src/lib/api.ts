@@ -2,14 +2,19 @@ export interface ErrorEnvelope {
   error: { code: string; title: string; detail: string; source: { pointer: string } | null };
 }
 
+/** Every user-panel API path starts here. */
+export const V1 = "/panel/web/v1";
+
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly title: string;
   readonly detail: string;
   readonly pointer: string | null;
+  /** Seconds from the Retry-After header, when the server sent one. */
+  readonly retryAfter: number | null;
 
-  constructor(status: number, code: string, title: string, detail: string, pointer: string | null = null) {
+  constructor(status: number, code: string, title: string, detail: string, pointer: string | null = null, retryAfter: number | null = null) {
     super(`${code}: ${title}`);
     this.name = "ApiError";
     this.status = status;
@@ -17,6 +22,7 @@ export class ApiError extends Error {
     this.title = title;
     this.detail = detail;
     this.pointer = pointer;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -64,7 +70,8 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
     }
     if (isEnvelope(parsed)) {
       const e = parsed.error;
-      throw new ApiError(res.status, e.code, e.title, e.detail, e.source?.pointer ?? null);
+      const wait = Number(res.headers.get("Retry-After"));
+      throw new ApiError(res.status, e.code, e.title, e.detail, e.source?.pointer ?? null, Number.isInteger(wait) && wait > 0 ? wait : null);
     }
     throw new ApiError(res.status, `HTTP_${res.status}`, "پاسخ نامعتبر از سرور", "لطفاً دوباره تلاش کنید.");
   }

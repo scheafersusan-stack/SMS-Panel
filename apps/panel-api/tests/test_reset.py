@@ -152,6 +152,7 @@ async def test_reset_resend_window_same_for_known_and_unknown(
         again = await client.post(START, json={"mobile": mobile})
         assert again.status_code == 429
         assert _err(again) == "OTP_RESEND_TOO_SOON"
+        assert not any(c.isascii() and c.isdigit() for c in again.json()["error"]["detail"])
     clock.advance(61)
     assert (await client.post(START, json={"mobile": known.mobile})).status_code == 202
 

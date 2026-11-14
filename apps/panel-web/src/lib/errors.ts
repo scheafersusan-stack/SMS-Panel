@@ -1,5 +1,5 @@
 import { ApiError } from "./api";
-import { jalaliDateTime } from "./format";
+import { faDigits, jalaliDateTime } from "./format";
 
 export const GENERIC_ERROR = "خطایی رخ داد؛ دوباره تلاش کنید.";
 
@@ -45,6 +45,9 @@ export function errorText(e: unknown): string {
     const when = jalaliDateTime(e.detail);
     return when ? `حساب شما تا ${when} قفل است؛ پس از آن دوباره تلاش کنید.` : "حساب شما موقتاً قفل است؛ بعداً دوباره تلاش کنید.";
   }
+  if (e.code === "OTP_RESEND_TOO_SOON") {
+    return e.retryAfter ? `ارسال مجدد کد هنوز ممکن نیست؛ ${faDigits(e.retryAfter)} ثانیهٔ دیگر دوباره تلاش کنید.` : "ارسال مجدد کد هنوز ممکن نیست؛ کمی بعد دوباره تلاش کنید.";
+  }
   if (e.code === "PASSWORD_WEAK") {
     const labels = passwordProblemLabels(e.detail);
     return labels.length ? `رمز عبور باید شامل این موارد باشد: ${labels.join("، ")}.` : "رمز عبور به‌اندازهٔ کافی قوی نیست.";
@@ -55,4 +58,9 @@ export function errorText(e: unknown): string {
 /** The JSON pointer of a field error without its leading slash («login_hours/0/from»), or null. */
 export function fieldPath(e: unknown): string | null {
   return e instanceof ApiError && e.pointer ? e.pointer.replace(/^\//, "") : null;
+}
+
+/** Seconds to wait before another code can be requested, when the error says so. */
+export function resendWait(e: unknown): number | null {
+  return e instanceof ApiError && e.code === "OTP_RESEND_TOO_SOON" ? e.retryAfter : null;
 }

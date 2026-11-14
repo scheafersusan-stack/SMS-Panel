@@ -139,6 +139,18 @@ describe("ProfileSecurity", () => {
     expect(body).toEqual({ login_notice: true, allowed_ips: ["192.168.1.0/24"], login_hours: [{ days: [0, 6], from: "08:00", to: "18:30" }] });
   });
 
+  it("shows the normalised CIDR the server saved", async () => {
+    base();
+    server.use(http.put(`${V1}/account/security`, () => HttpResponse.json({ login_notice: false, allowed_ips: ["192.168.1.0/24"], login_hours: [] })));
+    const user = userEvent.setup();
+    renderWithClient(<ProfileSecurity />);
+    await user.type(await screen.findByLabelText("نشانی IP یا محدوده (CIDR)"), "192.168.1.5/24");
+    await user.click(screen.getByRole("button", { name: "افزودن نشانی" }));
+    await user.click(screen.getByRole("button", { name: "ذخیرهٔ محدودیت‌ها" }));
+    expect(await screen.findByText("192.168.1.0/24")).toBeInTheDocument();
+    expect(screen.queryByText("192.168.1.5/24")).toBeNull();
+  });
+
   it("shows WOULD_LOCK_YOU_OUT with its explanation", async () => {
     base();
     server.use(http.put(`${V1}/account/security`, () => apiError(422, "WOULD_LOCK_YOU_OUT", "نشانی فعلی شما در فهرست مجاز نیست.", "/allowed_ips")));
@@ -166,6 +178,7 @@ describe("ProfileSecurity", () => {
     renderWithClient(<ProfileSecurity />);
     const list = await screen.findByRole("list", { name: "نشست‌های فعال" });
     expect(within(list).getByText("فعلی")).toBeInTheDocument();
+    expect(within(list).getByText("Firefox").closest("bdi")).toHaveAttribute("dir", "ltr");
     expect(within(list).queryByRole("button", { name: /بستن نشست 10\.0\.0\.1/ })).toBeNull();
     await user.click(within(list).getByRole("button", { name: /بستن نشست 10\.0\.0\.2/ }));
     await waitFor(() => expect(screen.queryByText("10.0.0.2")).toBeNull());

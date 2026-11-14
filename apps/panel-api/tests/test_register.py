@@ -246,6 +246,7 @@ async def test_resend_limit(app: FastAPI, client: httpx.AsyncClient, clock: Cloc
     assert r.status_code == 429
     assert r.json()["error"]["code"] == "OTP_RESEND_TOO_SOON"
     assert r.headers["retry-after"] == "30"
+    assert r.json()["error"]["detail"] == "۳۰ ثانیهٔ دیگر دوباره تلاش کنید."
     clock.now += timedelta(seconds=31)
     assert (await _start(client, local)).status_code == 202
 

@@ -1,24 +1,20 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type FormEvent, type ReactNode } from "react";
-import { ApiError, api } from "@/lib/api";
+import { useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { ApiError, V1, api } from "@/lib/api";
 import { errorText, fieldPath } from "@/lib/errors";
-import { jalaliDateTime } from "@/lib/format";
-import { faNumber } from "@/lib/format";
+import { faNumber, jalaliDateTime } from "@/lib/format";
 import { latinDigits } from "@/lib/phone";
 import { qrDataUrl } from "@/lib/qr";
+import { ME_KEY, useMe, type Me } from "@/lib/session";
 import { Button, IconButton } from "@/ui/Button";
 import { Card } from "@/ui/Card";
 import { Alert, Badge, Skeleton } from "@/ui/Feedback";
 import { TextField } from "@/ui/TextField";
+import { PASSWORD_HELP } from "../auth/parts";
 import { useToasts } from "./useToasts";
 
-const V1 = "/panel/web/v1";
-
-interface Me {
-  mfa_method: "none" | "totp" | "sms";
-}
 interface Security {
   login_notice: boolean;
   allowed_ips: string[];
@@ -97,7 +93,7 @@ function PasswordCard({ toast }: { toast: Toaster }) {
             type="password"
             ltr
             autoComplete="new-password"
-            help="دست‌کم ۸ نویسه با حرف بزرگ و کوچک لاتین، رقم و یک نویسهٔ ویژه"
+            help={PASSWORD_HELP}
             value={next}
             error={errors.new_password}
             onChange={(e) => setNext(e.target.value)}
@@ -123,7 +119,7 @@ const MFA_LABEL: Record<Me["mfa_method"], string> = { none: "غیرفعال", to
 
 function MfaCard({ toast }: { toast: Toaster }) {
   const qc = useQueryClient();
-  const me = useQuery({ queryKey: ["account", "me"], queryFn: () => api<Me>("GET", `${V1}/account/me`) });
+  const me = useMe();
   const [panel, setPanel] = useState<Panel>(null);
   const [setup, setSetup] = useState<{ secret: string; uri: string } | null>(null);
   const [code, setCode] = useState("");
@@ -183,7 +179,7 @@ function MfaCard({ toast }: { toast: Toaster }) {
       }
       close();
       toast(done);
-      await qc.invalidateQueries({ queryKey: ["account", "me"] });
+      await qc.invalidateQueries({ queryKey: ME_KEY });
     } catch (err) {
       const path = fieldPath(err);
       const wrongPassword = err instanceof ApiError && err.code === "CURRENT_PASSWORD_INVALID";
@@ -194,6 +190,7 @@ function MfaCard({ toast }: { toast: Toaster }) {
     }
   }
 
+  const qr = useMemo(() => (setup ? qrDataUrl(setup.uri) : null), [setup]);
   const method = me.data?.mfa_method;
   return (
     <Card title="ورود دومرحله‌ای" action={method ? <Badge tone={method === "none" ? "neutral" : "success"}>{MFA_LABEL[method]}</Badge> : undefined}>
@@ -232,7 +229,7 @@ function MfaCard({ toast }: { toast: Toaster }) {
                 <p style={{ margin: 0 }}>این کد QR را با برنامهٔ احراز هویت (مانند Google Authenticator) اسکن کنید، سپس کد ۶ رقمی را وارد کنید.</p>
                 <div className="qr-box">
                   {/* eslint-disable-next-line @next/next/no-img-element -- a generated data URL, not a network image */}
-                  <img src={qrDataUrl(setup.uri)} alt="کد QR برنامهٔ احراز هویت" width={180} height={180} />
+                  <img src={qr ?? undefined} alt="کد QR برنامهٔ احراز هویت" width={180} height={180} />
                   <div className="stack-sm">
                     <span className="small muted">اگر اسکن ممکن نیست، این کلید را وارد کنید:</span>
                     <code dir="ltr" className="ns-ltr">
@@ -273,7 +270,7 @@ function RestrictionsCard({ toast }: { toast: Toaster }) {
   const sec = useQuery({ queryKey: ["account", "security"], queryFn: () => api<Security>("GET", `${V1}/account/security`) });
   return (
     <Card title="محدودیت‌های ورود">
-      {sec.data ? <RestrictionsForm initial={sec.data} toast={toast} /> : sec.isError ? <Alert tone="danger">{errorText(sec.error)}</Alert> : <Skeleton height={120} />}
+      {sec.data ? <RestrictionsForm key={JSON.stringify(sec.data)} initial={sec.data} toast={toast} /> : sec.isError ? <Alert tone="danger">{errorText(sec.error)}</Alert> : <Skeleton height={120} />}
     </Card>
   );
 }
@@ -458,7 +455,7 @@ function SessionsCard({ toast }: { toast: Toaster }) {
           {list.data.sessions.map((s) => (
             <li key={s.id} className="list-row">
               <div className="grow">
-                <b>{s.user_agent ?? "دستگاه ناشناس"}</b>
+                <b>{s.user_agent ? <bdi dir="ltr">{s.user_agent}</bdi> : "دستگاه ناشناس"}</b>
                 <div className="small muted">
                   <span dir="ltr">{s.ip ?? "—"}</span> · آخرین فعالیت {jalaliDateTime(s.last_seen_at)}
                 </div>

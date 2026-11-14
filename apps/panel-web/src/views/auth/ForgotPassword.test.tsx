@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { HttpResponse, V1, apiError, http, server } from "@/test/msw";
@@ -57,5 +57,28 @@ describe("ForgotPassword", () => {
     const msg = await screen.findByText(/رمز عبور باید شامل این موارد باشد/);
     expect(msg).toHaveTextContent("یک حرف کوچک لاتین");
     expect(msg).toHaveTextContent("یک رقم");
+  });
+
+  it("shows a too-early resend error that points at the mobile field, and restarts the wait", async () => {
+    let starts = 0;
+    server.use(
+      http.post(`${V1}/auth/reset/start`, () => {
+        starts += 1;
+        if (starts === 1) return HttpResponse.json({ challenge_id: "r-4", resend_after: 1 }, { status: 202 });
+        return HttpResponse.json(
+          { error: { code: "OTP_RESEND_TOO_SOON", title: "t", detail: "x", source: { pointer: "/mobile" } } },
+          { status: 429, headers: { "Retry-After": "30" } },
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    render(<ForgotPassword />);
+    await user.type(screen.getByLabelText("شماره موبایل"), "09123456789");
+    await user.click(screen.getByRole("button", { name: "ارسال کد تأیید" }));
+    const resend = await screen.findByRole("button", { name: "ارسال دوباره کد" });
+    await waitFor(() => expect(resend).toBeEnabled(), { timeout: 4000 });
+    await user.click(resend);
+    expect(await screen.findByText(/ارسال مجدد کد هنوز ممکن نیست؛ ۳۰ ثانیهٔ دیگر/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "ارسال دوباره کد" })).toBeDisabled();
   });
 });

@@ -28,7 +28,7 @@ from payamakyar.api.errors import ApiError, validation_failed
 from payamakyar.api.notifier import Notifier, OutboxNotifier, SystemNotifier
 from payamakyar.api.ratelimit import RateLimiter
 from payamakyar.core.crypto import SecretBox, SecretBoxError
-from payamakyar.core.jalali import format_tehran
+from payamakyar.core.jalali import format_tehran, to_persian_digits
 from payamakyar.core.masking import mask_mobile
 from payamakyar.core.passwords import (
     hash_password,
@@ -86,7 +86,7 @@ async def _ensure_resend_window(
             429,
             "OTP_RESEND_TOO_SOON",
             "ارسال مجدد کد هنوز ممکن نیست",
-            f"{wait} ثانیهٔ دیگر دوباره تلاش کنید.",
+            f"{to_persian_digits(str(wait))} ثانیهٔ دیگر دوباره تلاش کنید.",
             pointer,
             headers={"Retry-After": str(wait)},
         )
@@ -623,7 +623,7 @@ async def _reset_resend_gate(redis: Redis, mobile: str, now: datetime, resend: i
                 429,
                 "OTP_RESEND_TOO_SOON",
                 "ارسال مجدد کد هنوز ممکن نیست",
-                f"{wait} ثانیهٔ دیگر دوباره تلاش کنید.",
+                f"{to_persian_digits(str(wait))} ثانیهٔ دیگر دوباره تلاش کنید.",
                 "/mobile",
                 headers={"Retry-After": str(wait)},
             )

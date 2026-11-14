@@ -1,15 +1,13 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { ApiError, api } from "@/lib/api";
+import { ApiError, V1, api } from "@/lib/api";
 import { useCountdown } from "@/lib/countdown";
-import { errorText, fieldPath } from "@/lib/errors";
+import { errorText, fieldPath, resendWait } from "@/lib/errors";
 import { latinDigits } from "@/lib/phone";
 import { Button } from "@/ui/Button";
 import { TextField } from "@/ui/TextField";
-import { BrandMark, CodeField, FormAlert, ResendRow, goTo } from "./parts";
-
-const V1 = "/panel/web/v1";
+import { BrandMark, CodeField, FormAlert, ResendRow, goAfterLogin } from "./parts";
 
 type LoginResult = { status: "ok" } | { status: "mfa_required"; method: "totp" | "sms"; mfa_token: string };
 interface Mfa {
@@ -42,6 +40,8 @@ export function Login() {
     } catch (e) {
       if (e instanceof ApiError && e.code === "MFA_TOKEN_INVALID") backToCredentials(errorText(e));
       else setError(errorText(e));
+      const wait = resendWait(e);
+      if (wait) countdown.start(wait);
     }
   }
 
@@ -52,9 +52,10 @@ export function Login() {
     try {
       const r = await api<LoginResult>("POST", `${V1}/auth/login`, { username: latinDigits(username.trim()), password });
       if (r.status === "ok") {
-        goTo("u-dashboard");
+        goAfterLogin();
         return;
       }
+      setPassword("");
       setMfa({ method: r.method, token: r.mfa_token });
       if (r.method === "sms") await sendSms(r.mfa_token);
     } catch (err) {
@@ -72,7 +73,7 @@ export function Login() {
     setBusy(true);
     try {
       await api("POST", `${V1}/auth/mfa/confirm`, { mfa_token: mfa.token, code: latinDigits(code.trim()) });
-      goTo("u-dashboard");
+      goAfterLogin();
     } catch (err) {
       if (err instanceof ApiError && err.code === "MFA_TOKEN_INVALID") backToCredentials(errorText(err));
       else if (fieldPath(err) === "code") setCodeError(errorText(err));

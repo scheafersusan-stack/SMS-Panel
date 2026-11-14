@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import RootLayout from "@/app/layout";
 import { App } from "@/App";
 import { ROUTES } from "@/routes";
+import { HttpResponse, V1, apiError, http, server } from "@/test/msw";
 import { Shell } from "./Shell";
 
 describe("root layout", () => {
@@ -84,14 +85,20 @@ describe("Shell", () => {
 });
 
 describe("App routes", () => {
-  it.each(Object.keys(ROUTES))("renders %s with its title", (id) => {
+  it.each(Object.keys(ROUTES))("renders %s with its title", async (id) => {
+    server.use(
+      http.get(`${V1}/account/me`, () =>
+        id.startsWith("auth-") ? apiError(401, "NOT_AUTHENTICATED") : HttpResponse.json({ id: "u", roles: ["staff"], permissions: ["users.view"] }),
+      ),
+    );
     window.location.hash = `#${id}`;
     render(<App />);
-    expect(screen.getByRole("heading", { level: 1, name: ROUTES[id]?.title })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 1, name: ROUTES[id]?.title })).toBeInTheDocument();
   });
-  it("falls back to the dashboard on an unknown hash", () => {
+  it("falls back to the dashboard on an unknown hash", async () => {
+    server.use(http.get(`${V1}/account/me`, () => HttpResponse.json({ id: "u", roles: ["customer"], permissions: [] })));
     window.location.hash = "#nope";
     render(<App />);
-    expect(screen.getByRole("heading", { level: 1, name: ROUTES["u-dashboard"]?.title })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 1, name: ROUTES["u-dashboard"]?.title })).toBeInTheDocument();
   });
 });

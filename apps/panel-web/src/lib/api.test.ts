@@ -45,6 +45,12 @@ describe("api", () => {
     expect(err).toBeInstanceOf(ApiError);
     expect(err).toMatchObject({ status: 422, code: "VALIDATION", title: "t", detail: "d", pointer: "/mobile" });
   });
+  it("exposes Retry-After as retryAfter", async () => {
+    mockFetch(Response.json({ error: { code: "X", title: "t", detail: "d", source: null } }, { status: 429, headers: { "Retry-After": "17" } }));
+    await expect(api("GET", "/panel/web/v1/x")).rejects.toMatchObject({ retryAfter: 17 });
+    mockFetch(Response.json({ error: { code: "X", title: "t", detail: "d", source: null } }, { status: 400 }));
+    await expect(api("GET", "/panel/web/v1/x")).rejects.toMatchObject({ retryAfter: null });
+  });
   it("uses a null pointer when source is null", async () => {
     mockFetch(Response.json({ error: { code: "X", title: "t", detail: "d", source: null } }, { status: 400 }));
     await expect(api("GET", "/panel/web/v1/x")).rejects.toMatchObject({ pointer: null });

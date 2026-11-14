@@ -1,7 +1,11 @@
 "use client";
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import { ApiError } from "@/lib/api";
+import { errorText } from "@/lib/errors";
+import { ME_KEY, afterLoginRoute, isStaff, rememberReturn, useMe } from "@/lib/session";
+import { Alert, EmptyState, Skeleton } from "@/ui/Feedback";
 import { DEFAULT_ROUTE, ROUTES, routeFromHash } from "@/routes";
 import { Shell } from "@/shell/Shell";
 import { ForgotPassword } from "@/views/auth/ForgotPassword";
@@ -37,6 +41,52 @@ function screenFor(route: string) {
   }
 }
 
+/** Routes whose screen needs a signed-in user (everything but the auth screens). */
+function Guarded({ route, role, children }: { route: string; role: "user" | "admin"; children: ReactNode }) {
+  const client = useQueryClient();
+  const me = useMe();
+  const unauthenticated = me.isError && !me.isFetching && me.error instanceof ApiError && me.error.status === 401;
+
+  // A stale 401 (from before a sign-in) is re-checked whenever the route changes.
+  useEffect(() => {
+    if (client.getQueryState(ME_KEY)?.status === "error") void client.invalidateQueries({ queryKey: ME_KEY });
+  }, [route, client]);
+  useEffect(() => {
+    if (unauthenticated) {
+      rememberReturn(route);
+      window.location.hash = "#auth-login";
+    }
+  }, [unauthenticated, route]);
+
+  let body: ReactNode;
+  if (me.data) {
+    body = role === "admin" && !isStaff(me.data) ? <EmptyState title="دسترسی ندارید" icon="alert">شما به این بخش دسترسی ندارید.</EmptyState> : children;
+  } else if (me.isError && !me.isFetching && !unauthenticated) {
+    body = <Alert tone="danger">{errorText(me.error)}</Alert>;
+  } else {
+    body = <Skeleton height={160} />;
+  }
+  return (
+    <Shell role={role} route={route}>
+      {body}
+    </Shell>
+  );
+}
+
+/** On the auth screens a signed-in visitor is sent on to the dashboard. */
+function AuthRoute({ route, children }: { route: string; children: ReactNode }) {
+  const me = useMe();
+  const signedIn = Boolean(me.data);
+  useEffect(() => {
+    if (signedIn && (route === "auth-login" || route === "auth-register")) window.location.hash = `#${afterLoginRoute()}`;
+  }, [signedIn, route]);
+  return (
+    <div className="auth-wrap">
+      <main className="content">{children}</main>
+    </div>
+  );
+}
+
 export function App() {
   const [client] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } } }));
   const route = useRoute();
@@ -47,13 +97,11 @@ export function App() {
   return (
     <QueryClientProvider client={client}>
       {role === "auth" ? (
-        <div className="auth-wrap">
-          <main className="content">{view}</main>
-        </div>
+        <AuthRoute route={route}>{view}</AuthRoute>
       ) : (
-        <Shell role={role} route={route}>
+        <Guarded route={route} role={role}>
           {view}
-        </Shell>
+        </Guarded>
       )}
     </QueryClientProvider>
   );

@@ -1,22 +1,23 @@
 "use client";
 
 import { useState, type FormEvent, type ReactNode } from "react";
-import { api } from "@/lib/api";
+import { V1, api } from "@/lib/api";
 import { useCountdown } from "@/lib/countdown";
-import { errorText, fieldPath } from "@/lib/errors";
+import { errorText, fieldPath, resendWait } from "@/lib/errors";
 import { formatMobile, latinDigits, normalizeMobile } from "@/lib/phone";
 import { Button } from "@/ui/Button";
 import { Stepper } from "@/ui/Nav";
 import { TextField } from "@/ui/TextField";
-import { AuthCard, CodeField, FormAlert, PASSWORD_HELP, ResendRow, goTo } from "./parts";
+import { AuthCard, CodeField, FormAlert, PASSWORD_HELP, ResendRow, goAfterLogin } from "./parts";
 
-const V1 = "/panel/web/v1";
 type Kind = "individual" | "company";
 type Errors = Record<string, ReactNode>;
 
 const STEPS = ["موبایل", "کد تأیید", "اطلاعات حساب"];
 /** The step that owns a server field. */
 const FIELD_STEP: Record<string, number> = { mobile: 0, code: 1 };
+/** Fields rendered on each step; an error for any other field is a form-level message. */
+const RENDERED: string[][] = [["mobile"], ["code"], ["first_name", "last_name", "company_name", "username", "password", "email"]];
 
 export function Register() {
   const [step, setStep] = useState(0);
@@ -35,10 +36,13 @@ export function Register() {
   function fail(err: unknown, own: number) {
     const path = fieldPath(err);
     const msg = errorText(err);
-    if (path && path in FIELD_STEP) {
-      setStep(FIELD_STEP[path] ?? own);
+    const wait = resendWait(err);
+    if (wait) countdown.start(wait);
+    if (path && RENDERED[own]?.includes(path)) {
       setErrors({ [path]: msg });
-    } else if (path && own === 2 && path in form) {
+    } else if (path && own === 2 && path in FIELD_STEP) {
+      // The final submit can be refused for the mobile or the code; go back to that step.
+      setStep(FIELD_STEP[path] ?? own);
       setErrors({ [path]: msg });
     } else {
       setFormError(msg);
@@ -121,7 +125,7 @@ export function Register() {
       else body.company_name = form.company_name.trim();
       if (form.email.trim()) body.email = form.email.trim();
       await api("POST", `${V1}/auth/register/complete`, body);
-      goTo("u-dashboard");
+      goAfterLogin();
     });
   };
 
