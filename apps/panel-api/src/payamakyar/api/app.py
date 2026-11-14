@@ -17,7 +17,7 @@ from payamakyar.api.errors import (
     install_error_handlers,
     internal_error_response,
 )
-from payamakyar.api.routes import account, admin_rbac, auth, health
+from payamakyar.api.routes import account, admin_audit, admin_rbac, auth, health
 from payamakyar.core.settings import PanelSettings, get_settings
 from payamakyar.db.engine import create_engine, session_factory
 
@@ -80,6 +80,7 @@ def create_app(settings: PanelSettings | None = None) -> FastAPI:
     web.include_router(account.router)
     admin = APIRouter(prefix="/panel/admin/v1", dependencies=[Depends(admin_gate)])
     admin.include_router(admin_rbac.router)
+    admin.include_router(admin_audit.router)
     app.include_router(health.router)
     app.include_router(web)
     app.include_router(admin)

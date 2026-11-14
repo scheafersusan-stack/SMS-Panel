@@ -13,9 +13,11 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from payamakyar.api import login, otp, sessions
+from payamakyar.api import login, otp, profile, sessions
 from payamakyar.api.deps import (
     CurrentSession,
+    CurrentUser,
+    Permissions,
     SessionDep,
     client_ip,
     get_clock,
@@ -30,7 +32,7 @@ from payamakyar.core.passwords import hash_password, verify_password
 from payamakyar.core.settings import PanelSettings
 from payamakyar.core.totp import new_totp_secret, totp_matching_step, totp_uri
 from payamakyar.db import audit
-from payamakyar.db.models import Session, User
+from payamakyar.db.models import Role, Session, User, UserRole
 
 router = APIRouter(prefix="/account", tags=["account"])
 
@@ -53,6 +55,89 @@ class SessionOut(BaseModel):
 
 class SessionList(BaseModel):
     sessions: list[SessionOut]
+
+
+async def _me(s: AsyncSession, user: User, perms: frozenset[str]) -> profile.MeOut:
+    names = (
+        await s.execute(
+            select(Role.name)
+            .join(UserRole, UserRole.role_id == Role.id)
+            .where(UserRole.user_id == user.id)
+            .order_by(Role.name)
+        )
+    ).scalars()
+    return profile.build_me(user, list(names), perms)
+
+
+@router.get("/me")
+async def me(user: CurrentUser, perms: Permissions, s: SessionDep) -> profile.MeOut:
+    return await _me(s, user, perms)
+
+
+class ProfileBody(BaseModel):
+    """Partial update (PATCH semantics on PUT): only the fields sent are changed; null clears."""
+
+    model_config = ConfigDict(extra="forbid")
+    first_name: str | None = None
+    last_name: str | None = None
+    national_code: str | None = None
+    birth_date: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    postal_code: str | None = None
+    address: str | None = None
+    company_name: str | None = None
+    company_national_id: str | None = None
+    economic_code: str | None = None
+    ceo_name: str | None = None
+    ceo_national_code: str | None = None
+
+
+@router.put("/profile")
+async def update_profile(
+    body: ProfileBody,
+    current: CurrentSession,
+    request: Request,
+    s: SessionDep,
+    clock: Clock,
+    perms: Permissions,
+) -> profile.MeOut:
+    user = await _locked_user(s, current)
+    allowed = profile.fields_for(user.kind)
+    today = profile.today_utc(clock())
+    values: dict[str, Any] = {}
+    for field in body.model_fields_set:
+        if field not in allowed:
+            raise validation_failed("این فیلد برای نوع حساب شما مجاز نیست.", f"/{field}")
+        raw = getattr(body, field)
+        values[field] = (
+            None if raw is None or not raw.strip() else profile.normalise(field, raw, today)
+        )
+    before: dict[str, Any] = {}
+    after: dict[str, Any] = {}
+    for field, new in values.items():
+        old = getattr(user, field)
+        if old != new:
+            before[field] = profile.display(field, old)
+            after[field] = profile.display(field, new)
+            setattr(user, field, new)
+    if before:
+        if profile.IDENTITY_FIELDS & before.keys() and user.identity_state != "none":
+            before["identity_state"] = user.identity_state
+            after["identity_state"] = "none"
+            user.identity_state = "none"
+        await audit.record(
+            s,
+            actor_id=user.id,
+            actor_ip=client_ip(request) or None,
+            action="user.profile_update",
+            target_type="user",
+            target_id=str(user.id),
+            before=before,
+            after=after,
+        )
+        await s.flush()
+    return await _me(s, user, perms)
 
 
 @router.get("/sessions")
