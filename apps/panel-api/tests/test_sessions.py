@@ -78,7 +78,7 @@ def test_cookie_attributes(env: str, secure: bool) -> None:
     }
     settings = PanelSettings(env=env, **kwargs)  # type: ignore[arg-type]
     response = Response()
-    sessions.set_cookies(response, settings, "tok", "csr")
+    sessions.set_cookies(response, settings, "tok", "csr", max_age=600)
     raw = {h.split("=", 1)[0]: h for h in response.headers.getlist("set-cookie")}
     sess, csrf = raw["pk_session"].lower(), raw["pk_csrf"].lower()
     assert "httponly" in sess
@@ -87,6 +87,7 @@ def test_cookie_attributes(env: str, secure: bool) -> None:
         assert "samesite=lax" in c
         assert "path=/" in c
         assert ("secure" in c) is secure
+        assert "max-age=600" in c
 
 
 async def test_resolve_rejects_inactive_or_expired_user(db_session: AsyncSession) -> None:

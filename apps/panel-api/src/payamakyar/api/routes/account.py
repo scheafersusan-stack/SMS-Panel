@@ -95,7 +95,13 @@ async def revoke_session(
         )
     ).scalar_one_or_none()
     if row is None or row.revoked_at is not None:
-        raise ApiError(404, "SESSION_NOT_FOUND", "نشست یافت نشد", "", "/session_id")
+        raise ApiError(
+            404,
+            "SESSION_NOT_FOUND",
+            "نشست یافت نشد",
+            "این نشست وجود ندارد یا پیش‌تر بسته شده است.",
+            "/session_id",
+        )
     row.revoked_at = clock()
     await audit.record(
         s,

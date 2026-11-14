@@ -1,3 +1,4 @@
+import asyncio
 import itertools
 import logging
 import uuid
@@ -11,6 +12,7 @@ import pytest
 from fastapi import FastAPI
 from sqlalchemy import select
 
+from payamakyar.api import otp
 from payamakyar.api.deps import get_clock
 from payamakyar.core.crypto import SecretBox
 from payamakyar.core.passwords import hash_password, verify_password
@@ -486,9 +488,10 @@ async def test_sms_flow(app: FastAPI, client: httpx.AsyncClient, clock: Clock) -
     assert "pk_session" in ok.cookies
     assert (await _get_user(app, user.id)).failed_logins == 0
     assert await _events(app, user.id) == ["mfa_required", "mfa_failed", "success"]
-    # The code is single-use.
+    # The token (and with it the code) is single-use.
     reuse = await client.post(MFA_CONFIRM, json={"mfa_token": token, "code": code})
-    assert reuse.status_code == 400
+    assert reuse.status_code == 401
+    assert _err(reuse) == "MFA_TOKEN_INVALID"
 
 
 async def test_sms_send_rejects_totp_token(
@@ -644,3 +647,96 @@ async def test_unauthenticated_sessions_list(client: httpx.AsyncClient) -> None:
     r = await client.get(SESSIONS)
     assert r.status_code == 401
     assert _err(r) == "NOT_AUTHENTICATED"
+
+
+# --- fix round 1 ----------------------------------------------------------------------
+
+
+async def _sms_token(app: FastAPI, client: httpx.AsyncClient, user: User) -> tuple[str, str]:
+    """(mfa_token, the sent code) for an SMS-MFA user."""
+    token = (await _login(client, user.username)).json()["mfa_token"]
+    assert (await client.post(MFA_SEND, json={"mfa_token": token})).status_code == 202
+    msg = await _latest_sms(app, user.mobile, "otp")
+    assert msg is not None
+    return token, "".join(ch for ch in msg.body if ch.isdigit())[:6]
+
+
+async def test_concurrent_wrong_sms_codes_all_counted(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    other_client: httpx.AsyncClient,
+    clock: Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await _user(app, mfa_method="sms")
+    token, code = await _sms_token(app, client, user)
+    real_check = otp.check
+
+    async def slow_check(*args: Any, **kwargs: Any) -> Any:
+        # Widen the gap after check() commits (and so releases the user row lock).
+        try:
+            return await real_check(*args, **kwargs)
+        finally:
+            await asyncio.sleep(0.2)
+
+    monkeypatch.setattr(otp, "check", slow_check)
+    wrong = "000000" if code != "000000" else "111111"
+    results = await asyncio.gather(
+        client.post(MFA_CONFIRM, json={"mfa_token": token, "code": wrong}),
+        other_client.post(MFA_CONFIRM, json={"mfa_token": token, "code": wrong}),
+    )
+    assert [r.status_code for r in results] == [400, 400]
+    assert (await _get_user(app, user.id)).failed_logins == 2
+
+
+async def test_concurrent_failures_lock_once(
+    app: FastAPI, client: httpx.AsyncClient, other_client: httpx.AsyncClient, clock: Clock
+) -> None:
+    user = await _user(app, failed_logins=3)
+    results = await asyncio.gather(
+        _login(client, user.username, "bad"), _login(other_client, user.username, "bad")
+    )
+    assert [r.status_code for r in results] == [401, 401]
+    fresh = await _get_user(app, user.id)
+    assert fresh.locked_until == clock.now + timedelta(seconds=900)
+    events = await _events(app, user.id)
+    assert sorted(events) == ["bad_password", "locked"]
+
+
+async def test_mfa_token_single_use(app: FastAPI, client: httpx.AsyncClient, clock: Clock) -> None:
+    secret = pyotp.random_base32()
+    user = await _user(app, mfa_method="totp", totp_secret_sealed=_box(app).seal(secret))
+    token = (await _login(client, user.username)).json()["mfa_token"]
+    code = pyotp.TOTP(secret).at(clock.now)
+    assert (
+        await client.post(MFA_CONFIRM, json={"mfa_token": token, "code": code})
+    ).status_code == 200
+    clock.advance(30)
+    nxt = pyotp.TOTP(secret).at(clock.now)
+    r = await client.post(MFA_CONFIRM, json={"mfa_token": token, "code": nxt})
+    assert r.status_code == 401
+    assert _err(r) == "MFA_TOKEN_INVALID"
+
+
+async def test_sms_send_rechecks_access(app: FastAPI, clock: Clock) -> None:
+    user = await _user(app, mfa_method="sms", allowed_ips=["10.0.0.0/8"])
+    async with _client(app, "10.20.30.40") as inside:
+        r = await _login(inside, user.username)
+        assert r.status_code == 200
+        token = r.json()["mfa_token"]
+    async with _client(app, "192.168.1.1") as outside:
+        r = await outside.post(MFA_SEND, json={"mfa_token": token})
+        assert r.status_code == 403
+        assert _err(r) == "LOGIN_IP_NOT_ALLOWED"
+    assert await _latest_sms(app, user.mobile, "otp") is None
+
+
+async def test_revoke_unknown_session_has_persian_detail(
+    app: FastAPI, client: httpx.AsyncClient, clock: Clock
+) -> None:
+    user = await _user(app)
+    assert (await _login(client, user.username)).status_code == 200
+    r = await client.delete(f"{SESSIONS}/{uuid.uuid4()}", headers=_csrf(client))
+    assert r.status_code == 404
+    assert _err(r) == "SESSION_NOT_FOUND"
+    assert r.json()["error"]["detail"]

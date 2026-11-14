@@ -20,8 +20,6 @@ class PanelSettings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     secret_key: SecretStr = SecretStr(_DEV_SECRET_KEY)
     public_base_url: str = "http://localhost:8000"
-    session_idle_seconds: int = 1800
-    session_absolute_seconds: int = 43200
     csrf_cookie_name: str = "pk_csrf"
     session_cookie_name: str = "pk_session"
     trusted_proxies: str = ""  # comma-separated CIDRs allowed to set X-Forwarded-For

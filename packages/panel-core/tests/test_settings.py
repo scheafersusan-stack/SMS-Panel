@@ -17,7 +17,9 @@ def test_dev_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     _clean(monkeypatch)
     s = PanelSettings(_env_file=None)
     assert s.env == "dev"
-    assert (s.session_idle_seconds, s.session_absolute_seconds) == (1800, 43200)
+    # Session lifetimes live in the settings store (session.*), not the environment.
+    assert not hasattr(s, "session_idle_seconds")
+    assert not hasattr(s, "session_absolute_seconds")
     assert (s.csrf_cookie_name, s.session_cookie_name) == ("pk_csrf", "pk_session")
     Fernet(s.secret_key.get_secret_value())
 

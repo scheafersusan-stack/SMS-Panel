@@ -14,12 +14,15 @@ import ipaddress
 import json
 import uuid
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import func, select
+from redis.asyncio import Redis
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from payamakyar.api.errors import ApiError
 from payamakyar.core.crypto import SecretBox, SecretBoxError
@@ -189,19 +192,42 @@ async def _locks_since_last_success(s: AsyncSession, user_id: uuid.UUID) -> int:
 async def register_failure(s: AsyncSession, user: User, now: datetime) -> str:
     """Count a failed credential/second-factor attempt; returns ``"locked"`` when it locks.
 
-    The n-th lock since the last successful login lasts ``lockout_seconds * 2**(n-1)``,
-    capped at 86400 s. The lock count is derived from ``login_events`` (outcome ``locked``).
+    The increment and the lock are single SQL statements, so concurrent failures are never
+    lost even when the caller no longer holds the row lock (``otp.check`` commits). The n-th
+    lock since the last successful login lasts ``lockout_seconds * 2**(n-1)``, capped at
+    86400 s; the lock count is derived from ``login_events`` (outcome ``locked``).
     """
     store = SettingsStore(s)
     max_tries = int(await store.get("auth.max_failed_tries"))
     base = int(await store.get("auth.lockout_seconds"))
-    user.failed_logins = (user.failed_logins or 0) + 1
-    if user.failed_logins < max_tries:
+    count = (
+        await s.execute(
+            update(User)
+            .where(User.id == user.id)
+            .values(failed_logins=User.failed_logins + 1)
+            .returning(User.failed_logins)
+            .execution_options(synchronize_session=False)
+        )
+    ).scalar_one()
+    set_committed_value(user, "failed_logins", count)
+    if count < max_tries:
         return "failed"
     prior = await _locks_since_last_success(s, user.id)
-    seconds = min(base * 2 ** min(prior, 20), MAX_LOCKOUT_SECONDS)
-    user.locked_until = now + timedelta(seconds=seconds)
-    user.failed_logins = 0
+    until = now + timedelta(seconds=min(base * 2 ** min(prior, 20), MAX_LOCKOUT_SECONDS))
+    # Only one of several concurrent threshold crossings locks (the others see the reset).
+    locked = (
+        await s.execute(
+            update(User)
+            .where(User.id == user.id, User.failed_logins >= max_tries)
+            .values(failed_logins=0, locked_until=until)
+            .returning(User.id)
+            .execution_options(synchronize_session=False)
+        )
+    ).first()
+    if locked is None:
+        return "failed"
+    set_committed_value(user, "failed_logins", 0)
+    set_committed_value(user, "locked_until", until)
     return "locked"
 
 
@@ -246,20 +272,46 @@ def seal_mfa_token(box: SecretBox, user_id: uuid.UUID, method: str, now: datetim
         "method": method,
         "iat": iat,
         "exp": iat + MFA_TOKEN_TTL_SECONDS,
+        "jti": uuid.uuid4().hex,
     }
     return box.seal(json.dumps(payload, separators=(",", ":")))
 
 
-def open_mfa_token(box: SecretBox, token: str, now: datetime) -> tuple[uuid.UUID, str, datetime]:
-    """``(user_id, method, issued_at)`` or 401 ``MFA_TOKEN_INVALID``."""
+@dataclass(frozen=True)
+class MfaClaims:
+    user_id: uuid.UUID
+    method: str
+    issued_at: datetime
+    expires_at: datetime
+    jti: str
+
+
+def _used_key(jti: str) -> str:
+    return f"mfa:used:{jti}"
+
+
+async def open_mfa_token(box: SecretBox, redis: Redis, token: str, now: datetime) -> MfaClaims:
+    """The token's claims, or 401 ``MFA_TOKEN_INVALID`` (bad, expired or already used)."""
     try:
         data = json.loads(box.open(token))
         if data.get("typ") != _MFA_TYP or data.get("method") not in ("totp", "sms"):
             raise ValueError("wrong token type")
-        user_id = uuid.UUID(str(data["user_id"]))
-        iat, exp = int(data["iat"]), int(data["exp"])
+        claims = MfaClaims(
+            user_id=uuid.UUID(str(data["user_id"])),
+            method=str(data["method"]),
+            issued_at=datetime.fromtimestamp(int(data["iat"]), UTC),
+            expires_at=datetime.fromtimestamp(int(data["exp"]), UTC),
+            jti=str(data["jti"]),
+        )
     except (SecretBoxError, ValueError, KeyError, TypeError, AttributeError):
         raise mfa_token_invalid() from None
-    if now.timestamp() >= exp:
+    if now >= claims.expires_at or not claims.jti or await redis.exists(_used_key(claims.jti)):
         raise mfa_token_invalid()
-    return user_id, str(data["method"]), datetime.fromtimestamp(iat, UTC)
+    return claims
+
+
+async def consume_mfa_token(redis: Redis, claims: MfaClaims, now: datetime) -> None:
+    """Mark the token used (until it would expire anyway); 401 if another request won."""
+    ttl = max(1, int((claims.expires_at - now).total_seconds()) + 1)
+    if not await redis.set(_used_key(claims.jti), "1", nx=True, ex=ttl):
+        raise mfa_token_invalid()

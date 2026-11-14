@@ -489,8 +489,8 @@ async def mfa_sms_send(
 ) -> MfaSendResult:
     now = clock()
     ip = client_ip(request)
-    user_id, method, _ = login.open_mfa_token(_box(settings), body.mfa_token, now)
-    if method != "sms":
+    claims = await login.open_mfa_token(_box(settings), redis, body.mfa_token, now)
+    if claims.method != "sms":
         raise ApiError(
             409,
             "MFA_METHOD_MISMATCH",
@@ -501,9 +501,21 @@ async def mfa_sms_send(
     limited = await RateLimiter(redis, lambda: now.timestamp()).hit(f"otp.start:{ip}", limit, 3600)
     if not limited.allowed:
         raise login.rate_limited(limited.retry_after)
-    user = await _mfa_user(s, user_id, "sms")
+    user = await _mfa_user(s, claims.user_id, "sms")
     if (until := login.locked_until(user, now)) is not None:
         raise login.account_locked(until, now)
+    problem = login.access_problem(user, ip, now)
+    if problem is not None:
+        raise await _fail(
+            s,
+            login.access_error(problem),
+            user_id=user.id,
+            tried=None,
+            ip=ip,
+            ua=request.headers.get("user-agent"),
+            outcome=problem,
+            at=now,
+        )
     resend = await _ensure_resend_window(
         s, now, None, OtpChallenge.purpose == "login", OtpChallenge.user_id == user.id
     )
@@ -531,12 +543,13 @@ async def mfa_confirm(
     ip = client_ip(request)
     ua = request.headers.get("user-agent")
     box = _box(settings)
-    user_id, method, issued_at = login.open_mfa_token(box, body.mfa_token, now)
-    ctx: dict[str, Any] = {"user_id": user_id, "tried": None, "ip": ip, "ua": ua, "at": now}
+    claims = await login.open_mfa_token(box, redis, body.mfa_token, now)
+    method = claims.method
+    ctx: dict[str, Any] = {"user_id": claims.user_id, "tried": None, "ip": ip, "ua": ua, "at": now}
     retry = await _limit(s, redis, f"auth.mfa:{ip}", now)
     if retry:
         raise await _fail(s, login.rate_limited(retry), outcome="rate_limited", **ctx)
-    user = await _mfa_user(s, user_id, method)
+    user = await _mfa_user(s, claims.user_id, method)
     if (until := login.locked_until(user, now)) is not None:
         raise await _fail(s, login.account_locked(until, now), outcome="locked_out", **ctx)
     problem = login.access_problem(user, ip, now)
@@ -550,7 +563,7 @@ async def mfa_confirm(
                     OtpChallenge.purpose == "login",
                     OtpChallenge.user_id == user.id,
                     OtpChallenge.consumed_at.is_(None),
-                    OtpChallenge.created_at >= issued_at,
+                    OtpChallenge.created_at >= claims.issued_at,
                 )
                 .order_by(OtpChallenge.created_at.desc())
                 .limit(1)
@@ -577,6 +590,7 @@ async def mfa_confirm(
             outcome = "locked" if locked else "mfa_failed"
             raise await _fail(s, _otp_invalid(), outcome=outcome, **ctx)
         user.totp_last_step = step
+    await login.consume_mfa_token(redis, claims, now)
     return await _complete_login(
         s, user, response, settings, notifier, ip=ip, ua=ua, tried=None, now=now, factor=method
     )

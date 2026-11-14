@@ -105,10 +105,13 @@ def set_cookies(
     token: str,
     csrf: str,
     *,
-    max_age: int | None = None,
+    max_age: int,
 ) -> None:
-    """``pk_session`` is HttpOnly; ``pk_csrf`` must stay readable by the page's JavaScript."""
-    age = settings.session_absolute_seconds if max_age is None else max_age
+    """``pk_session`` is HttpOnly; ``pk_csrf`` must stay readable by the page's JavaScript.
+
+    ``max_age`` is the session's absolute lifetime (``absolute_lifetime``, settings store).
+    """
+    age = max_age
     secure = settings.env not in ("dev", "test")
     response.set_cookie(
         settings.session_cookie_name,
