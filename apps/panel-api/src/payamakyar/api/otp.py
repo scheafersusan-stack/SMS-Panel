@@ -58,7 +58,7 @@ async def issue(
     return challenge_id, code
 
 
-def _invalid() -> ApiError:
+def invalid_code() -> ApiError:
     return ApiError(400, "OTP_INVALID", "کد تأیید نامعتبر است", "کد واردشده درست نیست.", "/code")
 
 
@@ -80,7 +80,7 @@ async def check(
         )
     ).scalar_one_or_none()
     if row is None or row.purpose != purpose or row.consumed_at is not None:
-        raise _invalid()
+        raise invalid_code()
     if now >= row.expires_at:
         raise ApiError(
             400, "OTP_EXPIRED", "کد تأیید منقضی شده است", "کد جدید درخواست کنید.", "/code"
@@ -96,7 +96,7 @@ async def check(
     if not hmac.compare_digest(row.code_hash, _digest(code, challenge_id)):
         row.attempts += 1
         await s.commit()
-        raise _invalid()
+        raise invalid_code()
     row.consumed_at = now
     await s.flush()
     return row

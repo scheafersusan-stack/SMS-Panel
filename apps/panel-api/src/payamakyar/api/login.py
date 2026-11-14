@@ -132,9 +132,11 @@ def ip_allowed(allowed: Iterable[Any] | None, ip: str) -> bool:
     if not nets:
         return True
     try:
-        addr = ipaddress.ip_address(ip)
+        addr: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(ip)
     except ValueError:
         return False
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped  # ::ffff:a.b.c.d matches IPv4 networks
     for net in nets:
         try:
             if addr in ipaddress.ip_network(str(net), strict=False):

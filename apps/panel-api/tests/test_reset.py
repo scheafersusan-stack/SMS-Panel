@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from sqlalchemy import func, select
 
+from payamakyar.api import otp
 from payamakyar.api.deps import get_clock
 from payamakyar.core.passwords import hash_password, verify_password
 from payamakyar.db.models import AuditEvent, OtpChallenge, Session, SystemMessage, User
@@ -266,3 +267,113 @@ async def test_reset_complete_wrong_code_and_forged_id(
     assert _err(r) == "OTP_INVALID"
     fresh = await _get_user(app, user.id)
     assert verify_password(fresh.password_hash, PASSWORD)
+
+
+async def _challenges(app: FastAPI, user_id: uuid.UUID) -> list[OtpChallenge]:
+    async with app.state.session_factory() as s:
+        rows = await s.execute(
+            select(OtpChallenge)
+            .where(OtpChallenge.user_id == user_id, OtpChallenge.purpose == "reset")
+            .order_by(OtpChallenge.created_at, OtpChallenge.id)
+        )
+        return list(rows.scalars().all())
+
+
+def _shape(r: httpx.Response) -> tuple[int, Any]:
+    return r.status_code, r.json()
+
+
+async def test_reset_failures_identical_for_known_and_unknown(
+    app: FastAPI, client: httpx.AsyncClient, clock: Clock
+) -> None:
+    known = await _user(app)
+    known_cid = (await client.post(START, json={"mobile": known.mobile})).json()["challenge_id"]
+    unknown_cid = (await client.post(START, json={"mobile": "989377777777"})).json()["challenge_id"]
+    assert uuid.UUID(unknown_cid).version == 7
+    assert uuid.UUID(known_cid).version == 7
+    code = await _code(app, known.mobile)
+    wrong = "000000" if code != "000000" else "111111"
+
+    async def attempt(cid: str) -> tuple[int, Any]:
+        body = {"challenge_id": cid, "code": wrong, "new_password": NEW_PASSWORD}
+        return _shape(await client.post(COMPLETE, json=body))
+
+    for _ in range(6):
+        assert await attempt(known_cid) == await attempt(unknown_cid)
+    assert (await attempt(known_cid))[0] == 400
+    clock.advance(600)
+    assert await attempt(known_cid) == await attempt(unknown_cid)
+    # Even the right code on an expired challenge looks the same.
+    body = {"challenge_id": known_cid, "code": code, "new_password": NEW_PASSWORD}
+    expired = _shape(await client.post(COMPLETE, json=body))
+    assert expired == await attempt(unknown_cid)
+
+
+async def test_reset_inactive_or_expired_user_gets_nothing(
+    app: FastAPI, client: httpx.AsyncClient, clock: Clock
+) -> None:
+    inactive = await _user(app, status="inactive")
+    expired = await _user(app, expires_at=clock.now - timedelta(days=1))
+    for user in (inactive, expired):
+        r = await client.post(START, json={"mobile": user.mobile})
+        assert r.status_code == 202
+        assert set(r.json()) == {"challenge_id", "resend_after"}
+        assert await _messages(app, user.mobile) == []
+        assert await _challenges(app, user.id) == []
+        assert "user.password_reset_requested" not in await _actions(app, user.id)
+
+
+async def test_reset_start_audits_known_user(
+    app: FastAPI, client: httpx.AsyncClient, clock: Clock
+) -> None:
+    user = await _user(app)
+    assert (await client.post(START, json={"mobile": user.mobile})).status_code == 202
+    assert await _actions(app, user.id) == ["user.password_reset_requested"]
+
+
+async def test_new_challenge_and_success_retire_older_challenges(
+    app: FastAPI, client: httpx.AsyncClient, clock: Clock
+) -> None:
+    user = await _user(app)
+    first = (await client.post(START, json={"mobile": user.mobile})).json()["challenge_id"]
+    first_code = await _code(app, user.mobile)
+    clock.advance(61)
+    second = (await client.post(START, json={"mobile": user.mobile})).json()["challenge_id"]
+    rows = {str(c.id): c for c in await _challenges(app, user.id)}
+    assert rows[first].consumed_at is not None
+    assert rows[second].consumed_at is None
+    r = await client.post(
+        COMPLETE,
+        json={"challenge_id": first, "code": first_code, "new_password": NEW_PASSWORD},
+    )
+    assert r.status_code == 400
+    # An extra outstanding challenge (e.g. from a race) is retired by a successful reset.
+    async with app.state.session_factory() as s:
+        extra, _ = await otp.issue(s, "reset", user.mobile, user.id, None, now=clock.now)
+        await s.commit()
+    second_code = await _code(app, user.mobile)
+    r = await client.post(
+        COMPLETE,
+        json={"challenge_id": second, "code": second_code, "new_password": NEW_PASSWORD},
+    )
+    assert r.status_code == 204, r.text
+    assert all(c.consumed_at is not None for c in await _challenges(app, user.id))
+    assert str(extra) in {str(c.id) for c in await _challenges(app, user.id)}
+
+
+async def test_reset_code_bound_to_its_challenge(
+    app: FastAPI, client: httpx.AsyncClient, clock: Clock
+) -> None:
+    a = await _user(app)
+    b = await _user(app)
+    await client.post(START, json={"mobile": a.mobile})
+    b_cid = (await client.post(START, json={"mobile": b.mobile})).json()["challenge_id"]
+    a_code = await _code(app, a.mobile)
+    if a_code == await _code(app, b.mobile):
+        pytest.skip("codes collided")
+    r = await client.post(
+        COMPLETE, json={"challenge_id": b_cid, "code": a_code, "new_password": NEW_PASSWORD}
+    )
+    assert r.status_code == 400
+    assert _err(r) == "OTP_INVALID"
+    assert verify_password((await _get_user(app, b.id)).password_hash, PASSWORD)

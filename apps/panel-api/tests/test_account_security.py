@@ -229,7 +229,8 @@ async def test_totp_enable_needs_valid_code(
     app: FastAPI, clock: Clock, signed: tuple[User, httpx.AsyncClient]
 ) -> None:
     user, c = signed
-    r = await c.post(TOTP_ENABLE, json={"code": "123456"}, headers=_csrf(c))
+    pw = {"password": PASSWORD}
+    r = await c.post(TOTP_ENABLE, json={"code": "123456", **pw}, headers=_csrf(c))
     assert r.status_code == 409
     assert _err(r) == "TOTP_SETUP_REQUIRED"
     r = await c.post(TOTP_SETUP, headers=_csrf(c))
@@ -242,12 +243,26 @@ async def test_totp_enable_needs_valid_code(
     assert pending.totp_secret_sealed is None
     totp = pyotp.TOTP(secret)
     wrong = "000000" if totp.at(clock.now) != "000000" else "111111"
-    r = await c.post(TOTP_ENABLE, json={"code": wrong}, headers=_csrf(c))
+    r = await c.post(TOTP_ENABLE, json={"code": wrong, **pw}, headers=_csrf(c))
     assert r.status_code == 400
     assert _err(r) == "OTP_INVALID"
     assert (await _get_user(app, user.id)).mfa_method == "none"
+    # The password is always required, and a wrong one counts toward the lockout.
     r = await c.post(TOTP_ENABLE, json={"code": totp.at(clock.now)}, headers=_csrf(c))
+    assert r.status_code == 422
+    r = await c.post(
+        TOTP_ENABLE,
+        json={"code": totp.at(clock.now), "password": "Wrong!Pass1"},
+        headers=_csrf(c),
+    )
+    assert r.status_code == 400
+    assert _err(r) == "CURRENT_PASSWORD_INVALID"
+    assert (await _get_user(app, user.id)).failed_logins == 1
+    assert (await _get_user(app, user.id)).mfa_method == "none"
+    assert "mfa_changed" not in await _templates(app, user.mobile)
+    r = await c.post(TOTP_ENABLE, json={"code": totp.at(clock.now), **pw}, headers=_csrf(c))
     assert r.status_code == 204, r.text
+    assert (await _templates(app, user.mobile))[-1] == "mfa_changed"
     fresh = await _get_user(app, user.id)
     assert fresh.mfa_method == "totp"
     assert fresh.totp_last_step == int(clock.now.timestamp()) // 30
@@ -276,8 +291,16 @@ async def test_sms_enable_and_disable_needs_password(
 ) -> None:
     user, c = signed
     r = await c.post(SMS_ENABLE, headers=_csrf(c))
+    assert r.status_code == 422
+    r = await c.post(SMS_ENABLE, json={"password": "Wrong!Pass1"}, headers=_csrf(c))
+    assert r.status_code == 400
+    assert _err(r) == "CURRENT_PASSWORD_INVALID"
+    assert (await _get_user(app, user.id)).mfa_method == "none"
+    assert (await _get_user(app, user.id)).failed_logins == 1
+    r = await c.post(SMS_ENABLE, json={"password": PASSWORD}, headers=_csrf(c))
     assert r.status_code == 204, r.text
     assert (await _get_user(app, user.id)).mfa_method == "sms"
+    assert (await _templates(app, user.mobile)).count("mfa_changed") == 1
     r = await c.post(MFA_DISABLE, json={"password": "Wrong!Pass1"}, headers=_csrf(c))
     assert r.status_code == 400
     assert _err(r) == "CURRENT_PASSWORD_INVALID"
@@ -285,6 +308,7 @@ async def test_sms_enable_and_disable_needs_password(
     assert (await _get_user(app, user.id)).failed_logins == 1
     r = await c.post(MFA_DISABLE, json={"password": PASSWORD}, headers=_csrf(c))
     assert r.status_code == 204, r.text
+    assert (await _templates(app, user.mobile)).count("mfa_changed") == 2
     fresh = await _get_user(app, user.id)
     assert fresh.mfa_method == "none"
     assert fresh.totp_secret_sealed is None
@@ -292,6 +316,25 @@ async def test_sms_enable_and_disable_needs_password(
     assert "user.mfa_enable" in actions
     assert "user.mfa_disable" in actions
     assert PASSWORD not in await _audit_payloads(app, user.id)
+
+
+async def test_mfa_changes_refused_while_locked(
+    app: FastAPI, clock: Clock, signed: tuple[User, httpx.AsyncClient]
+) -> None:
+    user, c = signed
+    r = await c.post(SMS_ENABLE, json={"password": PASSWORD}, headers=_csrf(c))
+    assert r.status_code == 204
+    async with app.state.session_factory() as s:
+        row = await s.get(User, user.id)
+        assert row is not None
+        row.locked_until = clock.now + timedelta(minutes=10)
+        await s.commit()
+    r = await c.post(MFA_DISABLE, json={"password": PASSWORD}, headers=_csrf(c))
+    assert r.status_code == 423
+    assert _err(r) == "ACCOUNT_LOCKED"
+    r = await c.post(SMS_ENABLE, json={"password": PASSWORD}, headers=_csrf(c))
+    assert r.status_code == 423
+    assert (await _get_user(app, user.id)).mfa_method == "sms"
 
 
 # --- security settings ------------------------------------------------------------------
@@ -415,3 +458,22 @@ async def test_security_refuses_to_lock_you_out(
 async def test_security_requires_auth(client: httpx.AsyncClient, clock: Clock) -> None:
     r = await client.get(SECURITY)
     assert r.status_code == 401
+
+
+async def test_ipv4_mapped_ipv6_matches_ipv4_cidr(app: FastAPI, clock: Clock) -> None:
+    mapped = "::ffff:10.1.2.3"
+    user = await _user(app, allowed_ips=["10.0.0.0/8"])
+    async with _signed_in(app, user, host=mapped) as c:
+        r = await c.put(
+            SECURITY,
+            json={"login_notice": False, "allowed_ips": ["10.0.0.0/8"], "login_hours": []},
+            headers=_csrf(c),
+        )
+        assert r.status_code == 200, r.text
+        r = await c.put(
+            SECURITY,
+            json={"login_notice": False, "allowed_ips": ["192.168.0.0/16"], "login_hours": []},
+            headers=_csrf(c),
+        )
+        assert r.status_code == 422
+        assert _err(r) == "WOULD_LOCK_YOU_OUT"

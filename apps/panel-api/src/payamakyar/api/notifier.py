@@ -1,8 +1,9 @@
 """System SMS (OTP, login notices) written to an outbox; phase 2 delivers them."""
 
 from string import Template
-from typing import Protocol
+from typing import Annotated, Protocol
 
+from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from payamakyar.db.jobs import enqueue
@@ -36,3 +37,11 @@ class OutboxNotifier:
         s.add(message)
         await s.flush()
         await enqueue(s, JOB_KIND, {"system_message_id": str(message.id)})
+
+
+def get_notifier() -> SystemNotifier:
+    """The request's notifier; tests override this dependency."""
+    return OutboxNotifier()
+
+
+Notifier = Annotated[SystemNotifier, Depends(get_notifier)]

@@ -1,7 +1,6 @@
 """The signed-in user's own account: sessions, password, second factor, sign-in limits."""
 
 import ipaddress
-import logging
 import re
 import uuid
 from collections.abc import Callable
@@ -14,7 +13,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from payamakyar.api import login, sessions
+from payamakyar.api import login, otp, sessions
 from payamakyar.api.deps import (
     CurrentSession,
     SessionDep,
@@ -22,9 +21,10 @@ from payamakyar.api.deps import (
     get_clock,
     get_redis,
     get_settings_dep,
+    not_authenticated,
 )
-from payamakyar.api.errors import ApiError
-from payamakyar.api.routes.auth import Notifier
+from payamakyar.api.errors import ApiError, validation_failed
+from payamakyar.api.notifier import Notifier, SystemNotifier
 from payamakyar.core.crypto import SecretBoxError
 from payamakyar.core.passwords import hash_password, verify_password
 from payamakyar.core.settings import PanelSettings
@@ -34,7 +34,6 @@ from payamakyar.db.models import Session, User
 
 router = APIRouter(prefix="/account", tags=["account"])
 
-log = logging.getLogger("payamakyar.api.account")
 
 Clock = Annotated[Callable[[], datetime], Depends(get_clock)]
 Settings = Annotated[PanelSettings, Depends(get_settings_dep)]
@@ -141,7 +140,7 @@ async def _locked_user(s: AsyncSession, current: Session) -> User:
         await s.execute(select(User).where(User.id == current.user_id).with_for_update())
     ).scalar_one_or_none()
     if user is None:
-        raise ApiError(401, "NOT_AUTHENTICATED", "ورود لازم است", "دوباره وارد حساب شوید.")
+        raise not_authenticated()
     return user
 
 
@@ -155,10 +154,12 @@ async def _reauthenticate(
     pointer: str,
 ) -> None:
     """Check the account password again. A wrong one counts toward the login lockout (and is
-    committed before raising); while the account is locked even the right one is refused."""
+    committed before raising); while the account is locked even the right one is refused.
+    A right one resets the failure count."""
     if (until := login.locked_until(user, now)) is not None:
         raise login.account_locked(until, now)
     if verify_password(user.password_hash, password):
+        user.failed_logins = 0  # as a successful sign-in does
         return
     locked = await login.register_failure(s, user, now) == "locked"
     ua = request.headers.get("user-agent")
@@ -226,7 +227,6 @@ async def change_password(
         s, user, body.current_password, request=request, now=now, pointer="/current_password"
     )
     user.password_hash = hash_password(body.new_password)
-    user.failed_logins = 0
     revoked = await sessions.revoke_all(s, user.id, now=now, except_id=current.id)
     await _audit_user(s, user, request, "user.password_change", after={"sessions_revoked": revoked})
     await notifier.send_sms(s, user.mobile, "password_changed", {})
@@ -244,11 +244,12 @@ class TotpSetup(BaseModel):
     otpauth_uri: str
 
 
+class PasswordBody(BaseModel):
+    password: Secret
+
+
 class TotpEnableBody(BaseModel):
     code: Code
-
-
-class MfaDisableBody(BaseModel):
     password: Secret
 
 
@@ -270,8 +271,36 @@ async def totp_setup(
     return TotpSetup(secret=secret, otpauth_uri=totp_uri(secret, user.username))
 
 
-def _otp_invalid() -> ApiError:
-    return ApiError(400, "OTP_INVALID", "کد تأیید نامعتبر است", "کد واردشده درست نیست.", "/code")
+def _setup_required() -> ApiError:
+    return ApiError(
+        409,
+        "TOTP_SETUP_REQUIRED",
+        "راه‌اندازی برنامهٔ احراز هویت لازم است",
+        "ابتدا کد QR تازه بگیرید.",
+    )
+
+
+async def _set_mfa(
+    s: AsyncSession,
+    user: User,
+    request: Request,
+    notifier: SystemNotifier,
+    redis: Redis,
+    method: str,
+    *,
+    sealed: str | None = None,
+    step: int | None = None,
+) -> None:
+    """Switch the second factor, audit it, tell the owner by SMS, drop any pending setup."""
+    before = {"method": user.mfa_method}
+    user.mfa_method = method
+    user.totp_secret_sealed = sealed
+    user.totp_last_step = step
+    action = "user.mfa_disable" if method == "none" else "user.mfa_enable"
+    await _audit_user(s, user, request, action, before=before, after={"method": method})
+    await notifier.send_sms(s, user.mobile, "mfa_changed", {})
+    await s.flush()
+    await redis.delete(_pending_key(user.id))
 
 
 @router.post("/mfa/totp/enable", status_code=204)
@@ -282,79 +311,62 @@ async def totp_enable(
     s: SessionDep,
     clock: Clock,
     settings: Settings,
-    redis: RedisDep,
-) -> None:
-    now = clock()
-    user = await _locked_user(s, current)
-    raw = await redis.get(_pending_key(user.id))
-    if raw is None:
-        raise ApiError(
-            409,
-            "TOTP_SETUP_REQUIRED",
-            "راه‌اندازی برنامهٔ احراز هویت لازم است",
-            "ابتدا کد QR تازه بگیرید.",
-        )
-    sealed = raw.decode() if isinstance(raw, bytes) else str(raw)
-    try:
-        secret = login.secret_box(settings).open(sealed)
-    except SecretBoxError:
-        await redis.delete(_pending_key(user.id))
-        raise ApiError(
-            409,
-            "TOTP_SETUP_REQUIRED",
-            "راه‌اندازی برنامهٔ احراز هویت لازم است",
-            "ابتدا کد QR تازه بگیرید.",
-        ) from None
-    step = totp_matching_step(secret, body.code, at=now)
-    if step is None:
-        raise _otp_invalid()
-    before = {"method": user.mfa_method}
-    user.mfa_method = "totp"
-    user.totp_secret_sealed = sealed
-    user.totp_last_step = step  # the enable code cannot be replayed at sign-in
-    await _audit_user(s, user, request, "user.mfa_enable", before=before, after={"method": "totp"})
-    await s.flush()
-    await redis.delete(_pending_key(user.id))
-
-
-@router.post("/mfa/sms/enable", status_code=204)
-async def sms_enable(
-    current: CurrentSession,
-    request: Request,
-    s: SessionDep,
-    redis: RedisDep,
-) -> None:
-    user = await _locked_user(s, current)
-    if not user.mobile:
-        raise ApiError(
-            409, "MOBILE_REQUIRED", "شمارهٔ موبایل ثبت نشده است", "ابتدا شمارهٔ موبایل را ثبت کنید."
-        )
-    before = {"method": user.mfa_method}
-    user.mfa_method = "sms"
-    user.totp_secret_sealed = None
-    user.totp_last_step = None
-    await _audit_user(s, user, request, "user.mfa_enable", before=before, after={"method": "sms"})
-    await redis.delete(_pending_key(user.id))
-
-
-@router.post("/mfa/disable", status_code=204)
-async def mfa_disable(
-    body: MfaDisableBody,
-    current: CurrentSession,
-    request: Request,
-    s: SessionDep,
-    clock: Clock,
+    notifier: Notifier,
     redis: RedisDep,
 ) -> None:
     now = clock()
     user = await _locked_user(s, current)
     await _reauthenticate(s, user, body.password, request=request, now=now, pointer="/password")
-    before = {"method": user.mfa_method}
-    user.mfa_method = "none"
-    user.totp_secret_sealed = None
-    user.totp_last_step = None
-    await _audit_user(s, user, request, "user.mfa_disable", before=before, after={"method": "none"})
-    await redis.delete(_pending_key(user.id))
+    raw = await redis.get(_pending_key(user.id))
+    if raw is None:
+        raise _setup_required()
+    sealed = raw.decode() if isinstance(raw, bytes) else str(raw)
+    try:
+        secret = login.secret_box(settings).open(sealed)
+    except SecretBoxError:
+        await redis.delete(_pending_key(user.id))
+        raise _setup_required() from None
+    step = totp_matching_step(secret, body.code, at=now)
+    if step is None:
+        raise otp.invalid_code()
+    # The accepted step is stored, so the enable code cannot be replayed at sign-in.
+    await _set_mfa(s, user, request, notifier, redis, "totp", sealed=sealed, step=step)
+
+
+@router.post("/mfa/sms/enable", status_code=204)
+async def sms_enable(
+    body: PasswordBody,
+    current: CurrentSession,
+    request: Request,
+    s: SessionDep,
+    clock: Clock,
+    notifier: Notifier,
+    redis: RedisDep,
+) -> None:
+    now = clock()
+    user = await _locked_user(s, current)
+    await _reauthenticate(s, user, body.password, request=request, now=now, pointer="/password")
+    if not user.mobile:
+        raise ApiError(
+            409, "MOBILE_REQUIRED", "شمارهٔ موبایل ثبت نشده است", "ابتدا شمارهٔ موبایل را ثبت کنید."
+        )
+    await _set_mfa(s, user, request, notifier, redis, "sms")
+
+
+@router.post("/mfa/disable", status_code=204)
+async def mfa_disable(
+    body: PasswordBody,
+    current: CurrentSession,
+    request: Request,
+    s: SessionDep,
+    clock: Clock,
+    notifier: Notifier,
+    redis: RedisDep,
+) -> None:
+    now = clock()
+    user = await _locked_user(s, current)
+    await _reauthenticate(s, user, body.password, request=request, now=now, pointer="/password")
+    await _set_mfa(s, user, request, notifier, redis, "none")
 
 
 # --- sign-in restrictions ---------------------------------------------------------------
@@ -389,17 +401,13 @@ class SecurityOut(BaseModel):
     login_hours: list[LoginWindow]
 
 
-def _invalid(detail: str, pointer: str) -> ApiError:
-    return ApiError(422, "VALIDATION_FAILED", "داده‌های ارسالی نامعتبر است", detail, pointer)
-
-
 def _normalize_ips(items: list[str]) -> list[str]:
     out: list[str] = []
     for i, item in enumerate(items):
         try:
             net = ipaddress.ip_network(item.strip(), strict=False)
         except ValueError:
-            raise _invalid("نشانی IP یا CIDR معتبر نیست.", f"/allowed_ips/{i}") from None
+            raise validation_failed("نشانی IP یا CIDR معتبر نیست.", f"/allowed_ips/{i}") from None
         if str(net) not in out:
             out.append(str(net))
     return out
@@ -415,13 +423,13 @@ def _normalize_windows(windows: list[LoginWindow]) -> list[dict[str, Any]]:
     for i, w in enumerate(windows):
         base = f"/login_hours/{i}"
         if not w.days or any(d < 0 or d > 6 for d in w.days):
-            raise _invalid("روزها باید از ۰ (شنبه) تا ۶ (جمعه) باشند.", f"{base}/days")
+            raise validation_failed("روزها باید از ۰ (شنبه) تا ۶ (جمعه) باشند.", f"{base}/days")
         if not _HHMM.fullmatch(w.from_):
-            raise _invalid("ساعت شروع باید به شکل HH:MM باشد.", f"{base}/from")
+            raise validation_failed("ساعت شروع باید به شکل HH:MM باشد.", f"{base}/from")
         if w.to != "24:00" and not _HHMM.fullmatch(w.to):
-            raise _invalid("ساعت پایان باید به شکل HH:MM یا 24:00 باشد.", f"{base}/to")
+            raise validation_failed("ساعت پایان باید به شکل HH:MM یا 24:00 باشد.", f"{base}/to")
         if _minutes(w.to) <= _minutes(w.from_):
-            raise _invalid("ساعت پایان باید بعد از ساعت شروع باشد.", f"{base}/to")
+            raise validation_failed("ساعت پایان باید بعد از ساعت شروع باشد.", f"{base}/to")
         out.append({"days": sorted(set(w.days)), "from": w.from_, "to": w.to})
     return out
 
@@ -452,7 +460,7 @@ def _snapshot(user: User) -> dict[str, Any]:
 async def get_security(current: CurrentSession, s: SessionDep) -> SecurityOut:
     user = await s.get(User, current.user_id)
     if user is None:
-        raise ApiError(401, "NOT_AUTHENTICATED", "ورود لازم است", "دوباره وارد حساب شوید.")
+        raise not_authenticated()
     return _security_of(user)
 
 

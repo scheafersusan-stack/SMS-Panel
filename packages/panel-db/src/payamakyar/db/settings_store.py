@@ -29,6 +29,9 @@ DEFAULTS: dict[str, Any] = {
     "system_sms.otp": "کد تأیید پیامک‌یار: $code\nاین کد را به کسی ندهید.",
     "system_sms.login_notice": "ورود به حساب پیامک‌یار شما در $time از نشانی $ip انجام شد.",
     "system_sms.password_changed": "رمز عبور حساب پیامک‌یار شما تغییر کرد.",
+    "system_sms.mfa_changed": (
+        "روش ورود دومرحله‌ای حساب پیامک‌یار شما تغییر کرد. اگر شما نبودید با پشتیبانی تماس بگیرید."
+    ),
 }
 
 _MISSING: Any = object()

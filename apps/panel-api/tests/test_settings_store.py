@@ -66,3 +66,15 @@ async def test_outbox_notifier(db_session: AsyncSession) -> None:
     with pytest.raises(ValueError):
         await OutboxNotifier().send_sms(db_session, "09121234567", "zzz", {})
     await db_session.rollback()
+
+
+async def test_mfa_changed_template(db_session: AsyncSession) -> None:
+    await OutboxNotifier().send_sms(db_session, "09121234567", "mfa_changed", {})
+    msg = (
+        await db_session.execute(
+            select(SystemMessage).where(SystemMessage.template_key == "mfa_changed")
+        )
+    ).scalar_one()
+    assert msg.body == DEFAULTS["system_sms.mfa_changed"]
+    assert "دومرحله‌ای" in msg.body
+    await db_session.rollback()

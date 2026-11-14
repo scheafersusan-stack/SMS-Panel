@@ -39,6 +39,10 @@ class ApiError(Exception):
         self.headers = dict(headers or {})
 
 
+def validation_failed(detail: str, pointer: str) -> ApiError:
+    return ApiError(422, "VALIDATION_FAILED", "داده‌های ارسالی نامعتبر است", detail, pointer)
+
+
 def error_response(
     status: int,
     code: str,

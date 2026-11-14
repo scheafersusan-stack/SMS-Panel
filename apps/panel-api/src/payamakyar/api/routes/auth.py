@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, StringConstraints
 from redis.asyncio import Redis
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,8 +25,8 @@ from payamakyar.api.deps import (
     get_redis,
     get_settings_dep,
 )
-from payamakyar.api.errors import ApiError
-from payamakyar.api.notifier import OutboxNotifier, SystemNotifier
+from payamakyar.api.errors import ApiError, validation_failed
+from payamakyar.api.notifier import Notifier, OutboxNotifier, SystemNotifier
 from payamakyar.api.ratelimit import RateLimiter
 from payamakyar.core.crypto import SecretBox, SecretBoxError
 from payamakyar.core.jalali import format_tehran
@@ -55,12 +55,7 @@ _EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
 
 
-def get_notifier() -> SystemNotifier:
-    return OutboxNotifier()
-
-
 Clock = Annotated[Callable[[], datetime], Depends(get_clock)]
-Notifier = Annotated[SystemNotifier, Depends(get_notifier)]
 Settings = Annotated[PanelSettings, Depends(get_settings_dep)]
 
 
@@ -78,10 +73,6 @@ async def _stored_kind(redis: Redis, challenge_id: uuid.UUID) -> str | None:
         return None
     value = raw.decode() if isinstance(raw, bytes) else str(raw)
     return value if value in ("individual", "company") else None
-
-
-def _invalid(detail: str, pointer: str) -> ApiError:
-    return ApiError(422, "VALIDATION_FAILED", "داده‌های ارسالی نامعتبر است", detail, pointer)
 
 
 async def _ensure_resend_window(
@@ -140,7 +131,7 @@ async def register_start(
     try:
         mobile = normalize_mobile(body.mobile)
     except InvalidMobile:
-        raise _invalid("شمارهٔ موبایل معتبر نیست.", "/mobile") from None
+        raise validation_failed("شمارهٔ موبایل معتبر نیست.", "/mobile") from None
     now = clock()
     ip = client_ip(request)
     limit = int(await SettingsStore(s).get("otp.start_rate_per_ip_per_hour"))
@@ -182,13 +173,15 @@ async def _customer_role_id(s: AsyncSession) -> uuid.UUID:
 def _validate_complete(body: CompleteBody, kind: str) -> None:
     if kind == "company":
         if not body.company_name:
-            raise _invalid("نام شرکت الزامی است.", "/company_name")
+            raise validation_failed("نام شرکت الزامی است.", "/company_name")
     elif not body.last_name:
-        raise _invalid("نام خانوادگی الزامی است.", "/last_name")
+        raise validation_failed("نام خانوادگی الزامی است.", "/last_name")
     if not _USERNAME.fullmatch(body.username):
-        raise _invalid("نام کاربری باید ۳ تا ۳۲ نویسهٔ انگلیسی، رقم، _ یا . باشد.", "/username")
+        raise validation_failed(
+            "نام کاربری باید ۳ تا ۳۲ نویسهٔ انگلیسی، رقم، _ یا . باشد.", "/username"
+        )
     if body.email is not None and not _EMAIL.fullmatch(body.email):
-        raise _invalid("نشانی ایمیل معتبر نیست.", "/email")
+        raise validation_failed("نشانی ایمیل معتبر نیست.", "/email")
 
 
 @router.post("/register/complete", status_code=201)
@@ -513,10 +506,6 @@ async def mfa_sms_send(
     return MfaSendResult(resend_after=resend)
 
 
-def _otp_invalid() -> ApiError:
-    return ApiError(400, "OTP_INVALID", "کد تأیید نامعتبر است", "کد واردشده درست نیست.", "/code")
-
-
 @router.post("/mfa/confirm")
 async def mfa_confirm(
     body: MfaConfirmBody,
@@ -559,7 +548,7 @@ async def mfa_confirm(
             )
         ).scalar_one_or_none()
         if challenge_id is None:
-            raise await _fail(s, _otp_invalid(), outcome="mfa_failed", **ctx)
+            raise await _fail(s, otp.invalid_code(), outcome="mfa_failed", **ctx)
         try:
             # check() commits a wrong attempt itself; nothing else is pending at this point.
             await otp.check(s, challenge_id, body.code, "login", now=now)
@@ -577,7 +566,7 @@ async def mfa_confirm(
         if step is None or (user.totp_last_step is not None and step <= user.totp_last_step):
             locked = await login.register_failure(s, user, now) == "locked"
             outcome = "locked" if locked else "mfa_failed"
-            raise await _fail(s, _otp_invalid(), outcome=outcome, **ctx)
+            raise await _fail(s, otp.invalid_code(), outcome=outcome, **ctx)
         user.totp_last_step = step
     await login.consume_mfa_token(redis, claims, now)
     return await _complete_login(
@@ -646,6 +635,60 @@ async def _reset_resend_gate(redis: Redis, mobile: str, now: datetime, resend: i
     await redis.set(key, str(now.timestamp()), ex=resend + KIND_GRACE_SECONDS)
 
 
+def _reset_code_invalid() -> ApiError:
+    """The single answer for every failed ``reset/complete`` code (wrong, expired, used up,
+    unknown id), so attempts and expiry cannot tell a registered number from a decoy."""
+    return ApiError(
+        400,
+        "OTP_INVALID",
+        "کد تأیید نامعتبر است",
+        "کد نامعتبر یا منقضی است؛ کد جدید بگیرید.",
+        "/code",
+    )
+
+
+async def _retire_reset_challenges(
+    s: AsyncSession, mobile: str, now: datetime, keep: uuid.UUID | None = None
+) -> None:
+    """Consume the number's other outstanding reset challenges."""
+    stmt = (
+        update(OtpChallenge)
+        .where(
+            OtpChallenge.purpose == "reset",
+            OtpChallenge.mobile == mobile,
+            OtpChallenge.consumed_at.is_(None),
+        )
+        .values(consumed_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if keep is not None:
+        stmt = stmt.where(OtpChallenge.id != keep)
+    await s.execute(stmt)
+
+
+async def _issue_reset(
+    s: AsyncSession,
+    notifier: SystemNotifier,
+    mobile: str,
+    user_id: uuid.UUID | None,
+    ip: str,
+    now: datetime,
+) -> uuid.UUID:
+    """Everything a reset start writes: retire older challenges, issue, queue the SMS, audit."""
+    await _retire_reset_challenges(s, mobile, now)
+    challenge_id, code = await otp.issue(s, "reset", mobile, user_id, ip, now=now)
+    await notifier.send_sms(s, mobile, "otp", {"code": code})
+    await audit.record(
+        s,
+        actor_id=user_id,
+        actor_ip=ip or None,
+        action="user.password_reset_requested",
+        target_type="user",
+        target_id=str(user_id) if user_id is not None else None,
+    )
+    return challenge_id
+
+
 @router.post("/reset/start", status_code=202)
 async def reset_start(
     body: ResetStartBody,
@@ -655,12 +698,13 @@ async def reset_start(
     notifier: Notifier,
     redis: Annotated[Redis, Depends(get_redis)],
 ) -> StartResult:
-    """Always 202 with the same body: an unknown number gets a challenge id that was never
-    stored (it simply fails at ``reset/complete``) and no SMS."""
+    """Always 202 with the same body. An unknown number, or an account that cannot sign in
+    (inactive or expired), takes the decoy path: the same writes run inside a savepoint that
+    is rolled back, so nothing is stored or sent and the (UUIDv7) id simply fails later."""
     try:
         mobile = normalize_mobile(body.mobile)
     except InvalidMobile:
-        raise _invalid("شمارهٔ موبایل معتبر نیست.", "/mobile") from None
+        raise validation_failed("شمارهٔ موبایل معتبر نیست.", "/mobile") from None
     now = clock()
     ip = client_ip(request)
     store = SettingsStore(s)
@@ -672,15 +716,13 @@ async def reset_start(
     resend = int(await store.get("otp.resend_seconds"))
     await _reset_resend_gate(redis, mobile, now, resend)
     user = (await s.execute(select(User).where(User.mobile == mobile))).scalar_one_or_none()
-    if user is None:
-        # Do the same database work as a real start, then roll it back: the response time
-        # and the (UUIDv7) id look the same as for a registered number.
+    if user is None or not sessions.user_can_sign_in(user, now):
         nested = await s.begin_nested()
-        challenge_id, _ = await otp.issue(s, "reset", mobile, None, ip, now=now)
+        # Always the transactional outbox here, so the rollback really unsends the decoy.
+        challenge_id = await _issue_reset(s, OutboxNotifier(), mobile, None, ip, now)
         await nested.rollback()
         return StartResult(challenge_id=challenge_id, resend_after=resend)
-    challenge_id, code = await otp.issue(s, "reset", mobile, user.id, ip, now=now)
-    await notifier.send_sms(s, mobile, "otp", {"code": code})
+    challenge_id = await _issue_reset(s, notifier, mobile, user.id, ip, now)
     log.info("password reset code queued", extra={"user_id": str(user.id)})
     return StartResult(challenge_id=challenge_id, resend_after=resend)
 
@@ -697,18 +739,22 @@ async def reset_complete(
     ip = client_ip(request)
     # Validation that must not burn the one-time code comes before check().
     await login.check_new_password(s, body.new_password, "/new_password")
-    # check() commits a wrong attempt itself; nothing else is pending at this point.
-    row = await otp.check(s, body.challenge_id, body.code, "reset", now=now)
+    try:
+        # check() commits a wrong attempt itself; nothing else is pending at this point.
+        row = await otp.check(s, body.challenge_id, body.code, "reset", now=now)
+    except ApiError:
+        raise _reset_code_invalid() from None
     user = None
     if row.user_id is not None:
         user = (
             await s.execute(select(User).where(User.id == row.user_id).with_for_update())
         ).scalar_one_or_none()
-    if user is None or user.mobile != row.mobile:
-        raise _otp_invalid()
+    if user is None or user.mobile != row.mobile or not sessions.user_can_sign_in(user, now):
+        raise _reset_code_invalid()
     user.password_hash = hash_password(body.new_password)
     user.failed_logins = 0
     user.locked_until = None
+    await _retire_reset_challenges(s, row.mobile, now, keep=row.id)
     revoked = await sessions.revoke_all(s, user.id, now=now)
     await audit.record(
         s,

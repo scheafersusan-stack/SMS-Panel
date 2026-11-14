@@ -84,7 +84,7 @@ def client_ip(request: Request) -> str:
     return result
 
 
-def _not_authenticated() -> ApiError:
+def not_authenticated() -> ApiError:
     return ApiError(401, "NOT_AUTHENTICATED", "ورود لازم است", "دوباره وارد حساب شوید.")
 
 
@@ -102,7 +102,7 @@ async def current_session(
     token = request.cookies.get(settings.session_cookie_name, "")
     row = await sessions.resolve(s, token, now=clock()) if token else None
     if row is None:
-        raise _not_authenticated()
+        raise not_authenticated()
     if request.method.upper() not in csrf.SAFE_METHODS:
         header = request.headers.get(csrf.HEADER, "")
         if not header or not hmac.compare_digest(sessions.hash_token(header), row.csrf_hash):
@@ -118,7 +118,7 @@ CurrentSession = Annotated[Session, Depends(current_session)]
 async def current_user(row: CurrentSession, s: SessionDep) -> User:
     user = await s.get(User, row.user_id)
     if user is None:
-        raise _not_authenticated()
+        raise not_authenticated()
     return user
 
 
