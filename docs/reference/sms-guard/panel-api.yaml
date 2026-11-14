@@ -1,0 +1,1679 @@
+# Panel API (SPEC §4.3) — OpenAPI 3.1. Component schemas of the six panel models mirror
+# smsguard.core.models.ingest (checked by tests/unit/test_api_docs.py); edit both together.
+openapi: 3.1.0
+info:
+  title: sms-guard panel API
+  version: 1.0.0
+  description: |
+    Panel → sms-guard ingest contract (SPEC §4.3; ADR 0017, ADR 0018; OPEN_QUESTIONS A1-A8, D5, D10).
+
+    All bodies are JSON (UTF-8); every timestamp is ISO-8601 with an offset and is emitted in UTC.
+    The outbound decision callback (sms-guard → panel) is documented in `docs/api/panel-callback.md`.
+
+    ## Authentication and signing
+
+    Every `/api/v1/messages*` request carries:
+
+    - `Authorization: Bearer <api_key>` (format `sg_<key_id>_<secret>`, exactly one header);
+    - `X-Guard-Timestamp: <unix epoch seconds>` — canonical decimal (`^[1-9][0-9]{0,19}$`),
+      within ±300 s of server time;
+    - `X-Guard-Signature: hmac-sha256=<64 hex>` where the digest is
+      `HMAC_SHA256(key = ASCII bytes of the inbound secret, msg = timestamp + "." + raw_body)`;
+      `raw_body` is the exact bytes sent (a GET signs `"<timestamp>."`). Hex is lowercase on
+      output and accepted in either case; comparison is constant-time; exactly one header.
+    - `Idempotency-Key` (POST /messages only): 1-255 visible ASCII characters.
+    - `Content-Type: application/json` on POST; `Content-Encoding` must be absent or `identity`.
+
+    Check order: maintenance (503) → body ≤ 64 KiB (413) → content type (415) → API key (401) →
+    timestamp (403) → signature (403) → replay cache (403) → rate limit (429) → syntax (400) →
+    validation (422) → conflicts (409).
+
+    ## Idempotency
+
+    Same `Idempotency-Key` + same request fingerprint (sha256 of the canonical JSON of the
+    validated request, so key order and whitespace do not matter) → the original `202` body
+    replayed with `Idempotent-Replayed: true`. Same key + different fingerprint → `409
+    IDEMPOTENCY_KEY_REUSED`; same `message_id` under another key → `409
+    MESSAGE_ID_ALREADY_REGISTERED`.
+
+    ## Rate limiting
+
+    Token bucket per client: ingest scope = `api_clients.rate_limit` requests/minute (default
+    600), read scope (poll, cancel) = 10 × that. Every authenticated response carries
+    `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`; `429` adds `Retry-After`.
+
+    ## Errors
+
+    Every error body is `ErrorResponse` (`{error_code, message, details, request_id}`) with
+    `Cache-Control: no-store` and `X-Request-Id`. The complete `error_code` catalogue
+    (also machine-readable in `x-error-codes`):
+
+    | error_code | HTTP | Meaning |
+    |---|---|---|
+    | `MISSING_IDEMPOTENCY_KEY` | 400 | Idempotency-Key header is absent. |
+    | `INVALID_IDEMPOTENCY_KEY` | 400 | Idempotency-Key repeated or not 1-255 visible ASCII characters. |
+    | `UNSUPPORTED_CONTENT_ENCODING` | 400 | Content-Encoding other than identity. |
+    | `MALFORMED_JSON` | 400 | Body is not valid UTF-8 JSON. |
+    | `INVALID_API_KEY` | 401 | Authorization missing, repeated, malformed, unknown, inactive or past its rotation grace. |
+    | `TIMESTAMP_INVALID` | 403 | X-Guard-Timestamp missing, repeated or not a canonical decimal integer. |
+    | `TIMESTAMP_OUT_OF_WINDOW` | 403 | X-Guard-Timestamp more than 300 s from server time. |
+    | `SIGNATURE_INVALID` | 403 | X-Guard-Signature missing, repeated, malformed or not matching (one message whatever the cause). |
+    | `REPLAY_DETECTED` | 403 | The signature was already used for a different method/path. |
+    | `NOT_FOUND` | 404 | Unknown route, or a guard_id that does not exist for this client. |
+    | `METHOD_NOT_ALLOWED` | 405 | Method not supported on this route. |
+    | `IDEMPOTENCY_KEY_REUSED` | 409 | Same Idempotency-Key with a different request fingerprint; details carry guard_id, status, poll_url. |
+    | `MESSAGE_ID_ALREADY_REGISTERED` | 409 | message_id already registered under another Idempotency-Key; details carry guard_id, status, poll_url. |
+    | `ALREADY_FINAL` | 409 | Cancel of a message whose final decision was already made. |
+    | `OUTBOX_NOT_RETRYABLE` | 409 | Dev-only (SMSGUARD_ENV=dev) manual retry seam, not a panel route: the outbox event is not DEAD or RETRY. |
+    | `PAYLOAD_TOO_LARGE` | 413 | Body larger than 64 KiB. |
+    | `UNSUPPORTED_MEDIA_TYPE` | 415 | Content-Type is not application/json (POST). |
+    | `VALIDATION_FAILED` | 422 | Field validation failed; details.errors[] lists {field, code, message} (codes include CALLBACK_URL_NOT_ALLOWED). |
+    | `GUARD_ID_MISMATCH` | 422 | Cancel body guard_id differs from the path guard_id. |
+    | `RATE_LIMITED` | 429 | Token bucket empty; Retry-After gives the wait in seconds. |
+    | `INTERNAL_ERROR` | 500 | Unexpected server error (no details). |
+    | `MAINTENANCE_MODE` | 503 | SMSGUARD_MAINTENANCE_MODE is on; Retry-After: 60. |
+    | `SERVICE_UNAVAILABLE` | 503 | A backing service (database, Redis replay cache or rate limiter) is unavailable; fail-closed. |
+    | `CREDENTIALS_UNAVAILABLE` | 503 | The client's stored secret cannot be decrypted (ADR 0019). |
+servers:
+- url: https://guard.internal.example
+  description: behind the Caddy reverse proxy
+security:
+- panelApiKey: []
+paths:
+  /api/v1/messages:
+    post:
+      operationId: submitMessage
+      summary: Submit a message for checking before it is sent
+      description: Stores the message as PENDING and returns 202 immediately. The verdict arrives by callback
+        (panel-callback.md) or by polling. The panel sends the SMS only after a final ALLOW.
+      security:
+      - panelApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/XGuardTimestamp'
+      - $ref: '#/components/parameters/XGuardSignature'
+      - $ref: '#/components/parameters/XRequestId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestRequest'
+      responses:
+        '202':
+          description: Accepted (or an idempotent replay of the original 202).
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/X-RateLimit-Reset'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/Idempotent-Replayed'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestAccepted'
+        '400':
+          description: 'error_code: `MISSING_IDEMPOTENCY_KEY`, `INVALID_IDEMPOTENCY_KEY`, `UNSUPPORTED_CONTENT_ENCODING`,
+            `MALFORMED_JSON`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/X-RateLimit-Reset'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: 'error_code: `INVALID_API_KEY`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 'error_code: `TIMESTAMP_INVALID`, `TIMESTAMP_OUT_OF_WINDOW`, `SIGNATURE_INVALID`,
+            `REPLAY_DETECTED`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: 'error_code: `IDEMPOTENCY_KEY_REUSED`, `MESSAGE_ID_ALREADY_REGISTERED`. details
+            carry the existing guard_id, status, poll_url.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/X-RateLimit-Reset'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: 'error_code: `PAYLOAD_TOO_LARGE`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '415':
+          description: 'error_code: `UNSUPPORTED_MEDIA_TYPE`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: 'error_code: `VALIDATION_FAILED`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/X-RateLimit-Reset'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: 'error_code: `RATE_LIMITED`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/X-RateLimit-Reset'
+            Retry-After:
+              $ref: '#/components/headers/Retry-After'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: 'error_code: `MAINTENANCE_MODE`, `SERVICE_UNAVAILABLE`, `CREDENTIALS_UNAVAILABLE`.
+            Fail-closed: the panel must treat the message as not sent.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Retry-After:
+              $ref: '#/components/headers/Retry-After'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/messages/{guard_id}:
+    get:
+      operationId: pollMessage
+      summary: Status and result (polling)
+      description: The latest DecisionEvent (same structure as the callback body) plus status, cancellation,
+        callback deliveries and timeline. All keys are always present (null or [] when empty). Signs the
+        empty body.
+      security:
+      - panelApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/GuardId'
+      - $ref: '#/components/parameters/XGuardTimestamp'
+      - $ref: '#/components/parameters/XGuardSignature'
+      - $ref: '#/components/parameters/XRequestId'
+      responses:
+        '200':
+          description: Current state of the message.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/X-RateLimit-Reset'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessagePollResponse'
+        '401':
+          description: 'error_code: `INVALID_API_KEY`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 'error_code: `TIMESTAMP_INVALID`, `TIMESTAMP_OUT_OF_WINDOW`, `SIGNATURE_INVALID`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: 'error_code: `NOT_FOUND`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/X-RateLimit-Reset'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: 'error_code: `RATE_LIMITED`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/X-RateLimit-Reset'
+            Retry-After:
+              $ref: '#/components/headers/Retry-After'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: 'error_code: `MAINTENANCE_MODE`, `SERVICE_UNAVAILABLE`, `CREDENTIALS_UNAVAILABLE`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Retry-After:
+              $ref: '#/components/headers/Retry-After'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/messages/{guard_id}/cancel:
+    post:
+      operationId: cancelMessage
+      summary: Cancel a pending or under-review message
+      description: Allowed from PENDING and UNDER_REVIEW; repeating it returns the same 200. No callback
+        is sent for a cancellation. The body guard_id must equal the path.
+      security:
+      - panelApiKey: []
+      parameters:
+      - $ref: '#/components/parameters/GuardId'
+      - $ref: '#/components/parameters/XGuardTimestamp'
+      - $ref: '#/components/parameters/XGuardSignature'
+      - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelRequest'
+      responses:
+        '200':
+          description: Cancelled (or already cancelled).
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/X-RateLimit-Reset'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelResponse'
+        '400':
+          description: 'error_code: `UNSUPPORTED_CONTENT_ENCODING`, `MALFORMED_JSON`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/X-RateLimit-Reset'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: 'error_code: `INVALID_API_KEY`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 'error_code: `TIMESTAMP_INVALID`, `TIMESTAMP_OUT_OF_WINDOW`, `SIGNATURE_INVALID`,
+            `REPLAY_DETECTED`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: 'error_code: `NOT_FOUND`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/X-RateLimit-Reset'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: 'error_code: `ALREADY_FINAL`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/X-RateLimit-Reset'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: 'error_code: `PAYLOAD_TOO_LARGE`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '415':
+          description: 'error_code: `UNSUPPORTED_MEDIA_TYPE`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: 'error_code: `VALIDATION_FAILED`, `GUARD_ID_MISMATCH`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/X-RateLimit-Reset'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: 'error_code: `RATE_LIMITED`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/X-RateLimit-Reset'
+            Retry-After:
+              $ref: '#/components/headers/Retry-After'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: 'error_code: `MAINTENANCE_MODE`, `SERVICE_UNAVAILABLE`, `CREDENTIALS_UNAVAILABLE`.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Retry-After:
+              $ref: '#/components/headers/Retry-After'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/health:
+    get:
+      operationId: health
+      summary: Liveness
+      security: []
+      responses:
+        '200':
+          description: The process is alive.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /api/v1/ready:
+    get:
+      operationId: ready
+      summary: Readiness
+      security: []
+      description: 200 only when db, redis and queue are ok; LLM/sandbox state is reported but never gates
+        readiness (fail-closed path exists).
+      responses:
+        '200':
+          description: Ready.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '503':
+          description: Not ready (a required check failed, or maintenance mode).
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+components:
+  securitySchemes:
+    panelApiKey:
+      type: http
+      scheme: bearer
+      description: API key issued per panel client (`sg_<key_id>_<secret>`); requests must also be HMAC-signed
+        (see info.description).
+  parameters:
+    XGuardTimestamp:
+      name: X-Guard-Timestamp
+      in: header
+      required: true
+      description: Unix epoch seconds, canonical decimal, within ±300 s.
+      schema:
+        type: string
+        pattern: ^[1-9][0-9]{0,19}$
+    XGuardSignature:
+      name: X-Guard-Signature
+      in: header
+      required: true
+      description: '`hmac-sha256=` + hex(HMAC_SHA256(secret, timestamp + "." + raw_body)).'
+      schema:
+        type: string
+        pattern: ^hmac-sha256=[0-9a-fA-F]{64}$
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Panel message id or a UUID; 1-255 visible ASCII characters.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+        pattern: ^[\x21-\x7E]{1,255}$
+    XRequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: Optional correlation id; echoed (or generated) on every response.
+      schema:
+        type: string
+        pattern: ^[A-Za-z0-9._:-]{1,128}$
+    GuardId:
+      name: guard_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  headers:
+    X-Request-Id:
+      description: Echo of the request's X-Request-Id (`^[A-Za-z0-9._:-]{1,128}$`) or a generated id.
+      schema:
+        type: string
+    Idempotent-Replayed:
+      description: '`true` when the 202 is a replay of an earlier identical request.'
+      schema:
+        type: string
+        enum:
+        - 'true'
+    X-RateLimit-Limit:
+      description: Bucket capacity (requests per minute for the scope).
+      schema:
+        type: integer
+    X-RateLimit-Remaining:
+      description: Whole tokens left in the bucket.
+      schema:
+        type: integer
+    X-RateLimit-Reset:
+      description: Seconds until the bucket is full again.
+      schema:
+        type: integer
+    Retry-After:
+      description: Seconds to wait before retrying (429; 503 MAINTENANCE_MODE).
+      schema:
+        type: integer
+        minimum: 1
+    Cache-Control:
+      description: '`no-store` on every panel API response.'
+      schema:
+        type: string
+  schemas:
+    Account:
+      additionalProperties: false
+      description: Panel account that submits the message.
+      properties:
+        id:
+          maxLength: 64
+          minLength: 1
+          title: Id
+          type: string
+        name:
+          maxLength: 200
+          minLength: 1
+          title: Name
+          type: string
+        tier:
+          maxLength: 32
+          minLength: 1
+          title: Tier
+          type: string
+        tags:
+          items:
+            maxLength: 32
+            type: string
+          maxItems: 20
+          title: Tags
+          type: array
+      required:
+      - id
+      - name
+      - tier
+      title: Account
+      type: object
+    CallbackDelivery:
+      additionalProperties: false
+      description: Delivery state of one callback event (``callback_outbox`` row).
+      properties:
+        event_id:
+          format: uuid
+          title: Event Id
+          type: string
+        event:
+          $ref: '#/components/schemas/DecisionEventType'
+        status:
+          $ref: '#/components/schemas/OutboxStatus'
+        attempts:
+          minimum: 0
+          title: Attempts
+          type: integer
+        next_attempt_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          default: null
+          title: Next Attempt At
+        delivered_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          default: null
+          title: Delivered At
+        last_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Last Error
+      required:
+      - event_id
+      - event
+      - status
+      - attempts
+      title: CallbackDelivery
+      type: object
+    CancelRequest:
+      additionalProperties: false
+      description: Body of ``POST /api/v1/messages/{guard_id}/cancel`` (A3).
+      properties:
+        guard_id:
+          format: uuid
+          title: Guard Id
+          type: string
+        reason:
+          anyOf:
+          - maxLength: 256
+            type: string
+          - type: 'null'
+          default: null
+          title: Reason
+      required:
+      - guard_id
+      title: CancelRequest
+      type: object
+    CancelResponse:
+      additionalProperties: false
+      description: '``200`` body of a (possibly repeated) cancel.'
+      properties:
+        guard_id:
+          format: uuid
+          title: Guard Id
+          type: string
+        message_id:
+          title: Message Id
+          type: string
+        status:
+          const: CANCELLED
+          title: Status
+          type: string
+        cancellation:
+          $ref: '#/components/schemas/Cancellation'
+      required:
+      - guard_id
+      - message_id
+      - status
+      - cancellation
+      title: CancelResponse
+      type: object
+    Cancellation:
+      additionalProperties: false
+      description: Cancellation record shown in the cancel and poll responses (A3).
+      properties:
+        cancelled_at:
+          format: date-time
+          title: Cancelled At
+          type: string
+        requested_by:
+          const: panel
+          default: panel
+          title: Requested By
+          type: string
+        reason_code:
+          const: PANEL_CANCELLED
+          default: PANEL_CANCELLED
+          title: Reason Code
+          type: string
+        reason:
+          default: پیام به درخواست پنل لغو شد.
+          title: Reason
+          type: string
+        panel_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Panel Reason
+      required:
+      - cancelled_at
+      title: Cancellation
+      type: object
+    DecidedBy:
+      additionalProperties: false
+      description: 'Who made the decision: a system component or an operator (user id).'
+      properties:
+        type:
+          $ref: '#/components/schemas/DecidedByType'
+        id:
+          maxLength: 128
+          minLength: 1
+          title: Id
+          type: string
+      required:
+      - type
+      - id
+      title: DecidedBy
+      type: object
+    DecidedByType:
+      description: '`decided_by.type` of a decision event.'
+      enum:
+      - system
+      - operator
+      title: DecidedByType
+      type: string
+    DecisionEvent:
+      additionalProperties: false
+      description: |-
+        Body of a ``decision.interim`` / ``decision.final`` callback.
+
+        Invariants (A7): ``is_final == (event == decision.final)`` and
+        ``verdict == MANUAL_REVIEW`` exactly when the event is not final; an
+        ``operator_note`` only on operator decisions.
+      properties:
+        event:
+          $ref: '#/components/schemas/DecisionEventType'
+        event_id:
+          format: uuid
+          title: Event Id
+          type: string
+        guard_id:
+          format: uuid
+          title: Guard Id
+          type: string
+        message_id:
+          maxLength: 128
+          minLength: 1
+          title: Message Id
+          type: string
+        sequence:
+          minimum: 1
+          title: Sequence
+          type: integer
+        verdict:
+          $ref: '#/components/schemas/Verdict'
+        is_final:
+          title: Is Final
+          type: boolean
+        risk_score:
+          anyOf:
+          - maximum: 100
+            minimum: 0
+            type: integer
+          - type: 'null'
+          title: Risk Score
+        confidence:
+          anyOf:
+          - maximum: 1.0
+            minimum: 0.0
+            type: number
+          - type: 'null'
+          title: Confidence
+        reason_code:
+          $ref: '#/components/schemas/ReasonCode'
+        reason:
+          minLength: 1
+          title: Reason
+          type: string
+        explanation:
+          minLength: 1
+          title: Explanation
+          type: string
+        rule_hits:
+          items:
+            $ref: '#/components/schemas/RuleHit'
+          title: Rule Hits
+          type: array
+        signals:
+          items:
+            $ref: '#/components/schemas/Signal'
+          title: Signals
+          type: array
+        links:
+          items:
+            $ref: '#/components/schemas/LinkSummary'
+          title: Links
+          type: array
+        evidence_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Evidence Url
+        decided_at:
+          format: date-time
+          title: Decided At
+          type: string
+        decided_by:
+          $ref: '#/components/schemas/DecidedBy'
+        operator_note:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Operator Note
+        versions:
+          $ref: '#/components/schemas/Versions'
+      required:
+      - event
+      - event_id
+      - guard_id
+      - message_id
+      - sequence
+      - verdict
+      - is_final
+      - risk_score
+      - confidence
+      - reason_code
+      - reason
+      - explanation
+      - decided_at
+      - decided_by
+      - versions
+      title: DecisionEvent
+      type: object
+    DecisionEventType:
+      description: Callback event name; `decision.interim` only ever carries MANUAL_REVIEW.
+      enum:
+      - decision.interim
+      - decision.final
+      title: DecisionEventType
+      type: string
+    ErrorResponse:
+      additionalProperties: false
+      description: Flat error envelope of the panel API (cluster A conventions).
+      properties:
+        error_code:
+          minLength: 1
+          title: Error Code
+          type: string
+        message:
+          title: Message
+          type: string
+        details:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          default: null
+          title: Details
+        request_id:
+          title: Request Id
+          type: string
+      required:
+      - error_code
+      - message
+      - request_id
+      title: ErrorResponse
+      type: object
+    EventActor:
+      description: Who caused a timeline event or status transition.
+      enum:
+      - system
+      - watchdog
+      - operator
+      - panel
+      title: EventActor
+      type: string
+    EventOutcome:
+      description: Outcome of a `message_events` row.
+      enum:
+      - STARTED
+      - OK
+      - FAILED
+      - TIMEOUT
+      - SKIPPED
+      title: EventOutcome
+      type: string
+    HealthResponse:
+      type: object
+      title: HealthResponse
+      additionalProperties: false
+      description: Liveness of the api process; never checks dependencies.
+      properties:
+        status:
+          const: ok
+          type: string
+          title: Status
+        service:
+          type: string
+          title: Service
+        version:
+          type: string
+          title: Version
+        time:
+          type: string
+          format: date-time
+          title: Time
+      required:
+      - status
+      - service
+      - version
+      - time
+    IngestAccepted:
+      additionalProperties: false
+      description: '``202 Accepted`` body (replayed verbatim on an idempotent retry).'
+      properties:
+        guard_id:
+          format: uuid
+          title: Guard Id
+          type: string
+        message_id:
+          title: Message Id
+          type: string
+        status:
+          $ref: '#/components/schemas/MessageStatus'
+        received_at:
+          format: date-time
+          title: Received At
+          type: string
+        decision_deadline_at:
+          format: date-time
+          title: Decision Deadline At
+          type: string
+        poll_url:
+          title: Poll Url
+          type: string
+      required:
+      - guard_id
+      - message_id
+      - status
+      - received_at
+      - decision_deadline_at
+      - poll_url
+      title: IngestAccepted
+      type: object
+    IngestContext:
+      additionalProperties: false
+      description: Optional submission context; only these four keys are accepted (A8).
+      properties:
+        campaign_id:
+          anyOf:
+          - maxLength: 128
+            type: string
+          - type: 'null'
+          default: null
+          title: Campaign Id
+        template_id:
+          anyOf:
+          - maxLength: 128
+            type: string
+          - type: 'null'
+          default: null
+          title: Template Id
+        client_ip:
+          anyOf:
+          - maxLength: 128
+            type: string
+          - type: 'null'
+          default: null
+          title: Client Ip
+        channel:
+          anyOf:
+          - maxLength: 128
+            type: string
+          - type: 'null'
+          default: null
+          title: Channel
+      title: IngestContext
+      type: object
+    IngestRequest:
+      additionalProperties: false
+      description: Body of ``POST /api/v1/messages``.
+      properties:
+        message_id:
+          maxLength: 128
+          minLength: 1
+          title: Message Id
+          type: string
+        account:
+          $ref: '#/components/schemas/Account'
+        sender:
+          $ref: '#/components/schemas/Sender'
+        recipients:
+          $ref: '#/components/schemas/Recipients'
+        text:
+          maxLength: 2000
+          minLength: 1
+          title: Text
+          type: string
+        scheduled_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          default: null
+          title: Scheduled At
+        submitted_at:
+          format: date-time
+          title: Submitted At
+          type: string
+        context:
+          $ref: '#/components/schemas/IngestContext'
+        callback_url:
+          anyOf:
+          - maxLength: 2048
+            minLength: 1
+            type: string
+          - type: 'null'
+          default: null
+          title: Callback Url
+      required:
+      - message_id
+      - account
+      - sender
+      - recipients
+      - text
+      - submitted_at
+      title: IngestRequest
+      type: object
+    LinkLabel:
+      description: Closed vocabulary of ``LinkSummary.verdict`` (H28); computed only by the
+        policy.
+      enum:
+      - ALLOWLISTED
+      - MALICIOUS
+      - SUSPICIOUS
+      - UNVERIFIED
+      - UNREACHABLE
+      title: LinkLabel
+      type: string
+    LinkSummary:
+      additionalProperties: false
+      description: 'Result of analysing one URL of the message.
+
+
+        ``verdict`` is the closed :class:`~smsguard.core.enums.LinkLabel` vocabulary (H28),
+
+        computed only by ``packages/policy`` (``link_label``); the wire shape is a string.'
+      properties:
+        original:
+          minLength: 1
+          title: Original
+          type: string
+        final:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Final
+        redirects:
+          minimum: 0
+          title: Redirects
+          type: integer
+        verdict:
+          $ref: '#/components/schemas/LinkLabel'
+      required:
+      - original
+      - redirects
+      - verdict
+      title: LinkSummary
+      type: object
+    MessagePollResponse:
+      additionalProperties: false
+      description: Body of ``GET /api/v1/messages/{guard_id}``; every key always present (A2).
+      properties:
+        guard_id:
+          format: uuid
+          title: Guard Id
+          type: string
+        message_id:
+          title: Message Id
+          type: string
+        status:
+          $ref: '#/components/schemas/MessageStatus'
+        received_at:
+          format: date-time
+          title: Received At
+          type: string
+        decision_deadline_at:
+          format: date-time
+          title: Decision Deadline At
+          type: string
+        finalized_at:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          default: null
+          title: Finalized At
+        decision:
+          anyOf:
+          - $ref: '#/components/schemas/DecisionEvent'
+          - type: 'null'
+          default: null
+        cancellation:
+          anyOf:
+          - $ref: '#/components/schemas/Cancellation'
+          - type: 'null'
+          default: null
+        callbacks:
+          items:
+            $ref: '#/components/schemas/CallbackDelivery'
+          title: Callbacks
+          type: array
+        timeline:
+          items:
+            $ref: '#/components/schemas/TimelineItem'
+          title: Timeline
+          type: array
+      required:
+      - guard_id
+      - message_id
+      - status
+      - received_at
+      - decision_deadline_at
+      title: MessagePollResponse
+      type: object
+    MessageStage:
+      description: Internal pipeline stage (`messages.stage`, `message_events.stage`; SPEC §6.1).
+      enum:
+      - RECEIVED
+      - NORMALIZED
+      - RULES_EVALUATED
+      - TEXT_ANALYZED
+      - LINKS_PRECHECKED
+      - SANDBOX_RUNNING
+      - LINKS_ANALYZED
+      - FUSED
+      - DECIDED
+      - FAILED_SAFE
+      - MANUAL_REVIEW
+      - REVIEWED
+      - CALLBACK_SENT
+      - CANCELLED
+      title: MessageStage
+      type: string
+    MessageStatus:
+      description: External status of a message (`messages.status`, poll response; ADR 0018).
+      enum:
+      - PENDING
+      - UNDER_REVIEW
+      - ALLOWED
+      - BLOCKED
+      - CANCELLED
+      title: MessageStatus
+      type: string
+    OutboxStatus:
+      description: Delivery state of a `callback_outbox` row (ADR 0020).
+      enum:
+      - PENDING
+      - IN_FLIGHT
+      - RETRY
+      - DELIVERED
+      - DEAD
+      - SUPERSEDED
+      title: OutboxStatus
+      type: string
+    ReadyCheck:
+      type: object
+      title: ReadyCheck
+      additionalProperties: false
+      properties:
+        state:
+          $ref: '#/components/schemas/ReadyState'
+        latency_ms:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Latency Ms
+        required:
+          type: boolean
+          title: Required
+          description: 'true for db, redis, queue: only required checks gate readiness.'
+        detail:
+          anyOf:
+          - $ref: '#/components/schemas/ReadyDetail'
+          - type: 'null'
+          default: null
+      required:
+      - state
+      - latency_ms
+      - required
+    ReadyDetail:
+      type: string
+      title: ReadyDetail
+      enum:
+      - schema_mismatch
+      - connection_failed
+      - timeout
+      - stream_missing
+      - no_consumer_group
+      - heartbeat_missing
+      - partial_heartbeats
+      - not_deployed
+    ReadyResponse:
+      type: object
+      title: ReadyResponse
+      additionalProperties: false
+      description: 'Readiness (OPEN_QUESTIONS D10): 200 only when every required check (db incl. Alembic
+        head, redis, queue) is ok; optional checks (llm, sandbox, workers) are reported but never gate.'
+      properties:
+        status:
+          $ref: '#/components/schemas/ReadyState'
+        maintenance:
+          type: boolean
+          title: Maintenance
+        checks:
+          type: object
+          title: Checks
+          additionalProperties:
+            $ref: '#/components/schemas/ReadyCheck'
+      required:
+      - status
+      - maintenance
+      - checks
+    ReadyState:
+      type: string
+      enum:
+      - ok
+      - degraded
+      - unavailable
+      - not_configured
+      title: ReadyState
+      description: State of one readiness check (`/api/v1/ready`).
+    ReasonCode:
+      description: Machine-readable decision reason (callback ``reason_code``).
+      enum:
+      - CLEAN
+      - ALLOWLISTED_TEMPLATE
+      - ALLOWLISTED_DOMAIN
+      - ADVERTISING_PROMOTIONAL
+      - ADVERTISING_BULK_UNSOLICITED
+      - PHISHING_CREDENTIAL_REQUEST
+      - PHISHING_BRAND_IMPERSONATION
+      - PHISHING_LOOKALIKE_DOMAIN
+      - PHISHING_URGENCY_SCAM
+      - PHISHING_SUSPECTED
+      - PAYMENT_HOST_NOT_SHAPARAK
+      - PAYMENT_LOOKALIKE_SHAPARAK
+      - PAYMENT_CARD_NUMBER_IN_TEXT
+      - ENAMAD_MISMATCH
+      - MALWARE_DOWNLOAD
+      - MALWARE_TI_HIT
+      - MALWARE_SUSPICIOUS_FILE
+      - PROHIBITED_GOODS
+      - PROHIBITED_TOPIC_CUSTOM
+      - LINK_UNREACHABLE
+      - LINK_PRECHECK_TIMEOUT
+      - LINK_SHORTENER
+      - SANDBOX_TIMEOUT
+      - CAPTCHA_UNSOLVED
+      - LOGIN_REQUIRED
+      - SUSPICIOUS_BEHAVIOR
+      - SUBSYSTEM_UNAVAILABLE
+      - LOW_CONFIDENCE
+      - DECISION_DEADLINE_EXCEEDED
+      - OPERATOR_APPROVED
+      - OPERATOR_REJECTED
+      - PANEL_CANCELLED
+      - DENYLISTED_DOMAIN
+      - LINK_NEW_DOMAIN
+      - LINK_TLS_INVALID
+      - LINK_SHORTENER_UNKNOWN
+      - LINK_CREDENTIAL_FORM
+      - ADULT_CONTENT
+      title: ReasonCode
+      type: string
+    Recipients:
+      additionalProperties: false
+      description: Recipient summary; full numbers are never part of the contract (A8).
+      properties:
+        count:
+          maximum: 10000000
+          minimum: 1
+          title: Count
+          type: integer
+        sample_masked:
+          items:
+            maxLength: 32
+            type: string
+          maxItems: 10
+          title: Sample Masked
+          type: array
+        list_id:
+          anyOf:
+          - maxLength: 64
+            type: string
+          - type: 'null'
+          default: null
+          title: List Id
+      required:
+      - count
+      title: Recipients
+      type: object
+    RuleAction:
+      description: Action of a matched rule; FLAG contributes to the score only.
+      enum:
+      - BLOCK
+      - REVIEW
+      - ALLOW
+      - FLAG
+      title: RuleAction
+      type: string
+    RuleHit:
+      additionalProperties: false
+      description: A matched rule as reported to the panel.
+      properties:
+        rule_id:
+          maxLength: 64
+          minLength: 1
+          title: Rule Id
+          type: string
+        name:
+          minLength: 1
+          title: Name
+          type: string
+        severity:
+          $ref: '#/components/schemas/Severity'
+        action:
+          $ref: '#/components/schemas/RuleAction'
+        version:
+          minimum: 1
+          title: Version
+          type: integer
+      required:
+      - rule_id
+      - name
+      - severity
+      - action
+      - version
+      title: RuleHit
+      type: object
+    Sender:
+      additionalProperties: false
+      description: Sending line.
+      properties:
+        line:
+          maxLength: 32
+          minLength: 1
+          title: Line
+          type: string
+        line_type:
+          maxLength: 32
+          minLength: 1
+          title: Line Type
+          type: string
+      required:
+      - line
+      - line_type
+      title: Sender
+      type: object
+    Severity:
+      description: Rule / reason severity.
+      enum:
+      - CRITICAL
+      - HIGH
+      - MEDIUM
+      - LOW
+      title: Severity
+      type: string
+    Signal:
+      additionalProperties: false
+      description: One scored observation (``decision_signals`` row).
+      properties:
+        type:
+          maxLength: 128
+          minLength: 1
+          title: Type
+          type: string
+        value:
+          title: Value
+        weight:
+          title: Weight
+          type: integer
+        confidence:
+          anyOf:
+          - maximum: 1.0
+            minimum: 0.0
+            type: number
+          - type: 'null'
+          default: null
+          title: Confidence
+        source:
+          $ref: '#/components/schemas/SignalSource'
+      required:
+      - type
+      - value
+      - weight
+      - source
+      title: Signal
+      type: object
+    SignalSource:
+      description: Producer of a `decision_signals` row.
+      enum:
+      - rule
+      - classifier
+      - llm
+      - link
+      - ti
+      - sandbox
+      - vlm
+      - system
+      title: SignalSource
+      type: string
+    TimelineItem:
+      additionalProperties: false
+      description: One ``message_events`` row as shown to the panel.
+      properties:
+        at:
+          format: date-time
+          title: At
+          type: string
+        stage:
+          $ref: '#/components/schemas/MessageStage'
+        outcome:
+          $ref: '#/components/schemas/EventOutcome'
+        actor:
+          $ref: '#/components/schemas/EventActor'
+        reason_code:
+          anyOf:
+          - $ref: '#/components/schemas/ReasonCode'
+          - type: 'null'
+          default: null
+      required:
+      - at
+      - stage
+      - outcome
+      - actor
+      title: TimelineItem
+      type: object
+    Verdict:
+      description: Decision verdict sent to the panel.
+      enum:
+      - ALLOW
+      - BLOCK
+      - MANUAL_REVIEW
+      title: Verdict
+      type: string
+    Versions:
+      additionalProperties: false
+      description: Versions that produced the decision; all five keys always emitted (D8).
+      properties:
+        policy:
+          minLength: 1
+          title: Policy
+          type: string
+        ruleset:
+          minLength: 1
+          title: Ruleset
+          type: string
+        text_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Text Model
+        vision_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          description: The vision model (`model_versions` kind `vision`) whose screenshot assessment the
+            decision weighed; filled when the VLM is deployed and assessed a sandbox job of this message
+            (ADR 0037), null otherwise (always null before Phase 5).
+          title: Vision Model
+        prompt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Prompt
+      required:
+      - policy
+      - ruleset
+      title: Versions
+      type: object
+x-error-codes:
+  MISSING_IDEMPOTENCY_KEY:
+    status: 400
+    description: Idempotency-Key header is absent.
+  INVALID_IDEMPOTENCY_KEY:
+    status: 400
+    description: Idempotency-Key repeated or not 1-255 visible ASCII characters.
+  UNSUPPORTED_CONTENT_ENCODING:
+    status: 400
+    description: Content-Encoding other than identity.
+  MALFORMED_JSON:
+    status: 400
+    description: Body is not valid UTF-8 JSON.
+  INVALID_API_KEY:
+    status: 401
+    description: Authorization missing, repeated, malformed, unknown, inactive or past its rotation grace.
+  TIMESTAMP_INVALID:
+    status: 403
+    description: X-Guard-Timestamp missing, repeated or not a canonical decimal integer.
+  TIMESTAMP_OUT_OF_WINDOW:
+    status: 403
+    description: X-Guard-Timestamp more than 300 s from server time.
+  SIGNATURE_INVALID:
+    status: 403
+    description: X-Guard-Signature missing, repeated, malformed or not matching (one message whatever
+      the cause).
+  REPLAY_DETECTED:
+    status: 403
+    description: The signature was already used for a different method/path.
+  NOT_FOUND:
+    status: 404
+    description: Unknown route, or a guard_id that does not exist for this client.
+  METHOD_NOT_ALLOWED:
+    status: 405
+    description: Method not supported on this route.
+  IDEMPOTENCY_KEY_REUSED:
+    status: 409
+    description: Same Idempotency-Key with a different request fingerprint; details carry guard_id, status,
+      poll_url.
+  MESSAGE_ID_ALREADY_REGISTERED:
+    status: 409
+    description: message_id already registered under another Idempotency-Key; details carry guard_id,
+      status, poll_url.
+  ALREADY_FINAL:
+    status: 409
+    description: Cancel of a message whose final decision was already made.
+  OUTBOX_NOT_RETRYABLE:
+    status: 409
+    description: Dev-only (SMSGUARD_ENV=dev) manual retry seam, not a panel route; the outbox event
+      is not DEAD or RETRY.
+  PAYLOAD_TOO_LARGE:
+    status: 413
+    description: Body larger than 64 KiB.
+  UNSUPPORTED_MEDIA_TYPE:
+    status: 415
+    description: Content-Type is not application/json (POST).
+  VALIDATION_FAILED:
+    status: 422
+    description: Field validation failed; details.errors[] lists {field, code, message} (codes include
+      CALLBACK_URL_NOT_ALLOWED).
+  GUARD_ID_MISMATCH:
+    status: 422
+    description: Cancel body guard_id differs from the path guard_id.
+  RATE_LIMITED:
+    status: 429
+    description: Token bucket empty; Retry-After gives the wait in seconds.
+  INTERNAL_ERROR:
+    status: 500
+    description: Unexpected server error (no details).
+  MAINTENANCE_MODE:
+    status: 503
+    description: 'SMSGUARD_MAINTENANCE_MODE is on; Retry-After: 60.'
+  SERVICE_UNAVAILABLE:
+    status: 503
+    description: A backing service (database, Redis replay cache or rate limiter) is unavailable; fail-closed.
+  CREDENTIALS_UNAVAILABLE:
+    status: 503
+    description: The client's stored secret cannot be decrypted (ADR 0019).
