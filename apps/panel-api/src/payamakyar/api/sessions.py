@@ -10,7 +10,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import Response
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from payamakyar.core.settings import PanelSettings
@@ -97,6 +97,27 @@ async def resolve(
         row.last_seen_at = at
         await s.flush()
     return row
+
+
+async def revoke_all(
+    s: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    now: datetime,
+    except_id: uuid.UUID | None = None,
+) -> int:
+    """Revoke every live session of ``user_id`` (but ``except_id``); returns how many.
+    Does not commit."""
+    stmt = (
+        update(Session)
+        .where(Session.user_id == user_id, Session.revoked_at.is_(None))
+        .values(revoked_at=now)
+        .returning(Session.id)
+        .execution_options(synchronize_session=False)
+    )
+    if except_id is not None:
+        stmt = stmt.where(Session.id != except_id)
+    return len((await s.execute(stmt)).all())
 
 
 def set_cookies(

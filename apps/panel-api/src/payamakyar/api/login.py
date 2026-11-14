@@ -27,14 +27,21 @@ from sqlalchemy.orm.attributes import set_committed_value
 from payamakyar.api.errors import ApiError
 from payamakyar.core.crypto import SecretBox, SecretBoxError
 from payamakyar.core.jalali import TEHRAN
-from payamakyar.core.passwords import hash_password
+from payamakyar.core.passwords import hash_password, password_problems
+from payamakyar.core.settings import PanelSettings
 from payamakyar.db.models import LoginEvent, User
 from payamakyar.db.settings_store import SettingsStore
 
 MFA_TOKEN_TTL_SECONDS = 300
+MAX_PASSWORD_LENGTH = 128
 MAX_LOCKOUT_SECONDS = 86400
 _MFA_TYP = "mfa"
 _NIL_UUID = uuid.UUID(int=0)
+
+
+def secret_box(settings: PanelSettings) -> SecretBox:
+    """The box that seals mfa tokens and TOTP secrets (keyed by ``settings.secret_key``)."""
+    return SecretBox(settings.secret_key.get_secret_value().encode())
 
 
 @lru_cache(maxsize=1)
@@ -99,6 +106,22 @@ _ACCESS_ERRORS: dict[str, tuple[str, str, str]] = {
 def access_error(outcome: str) -> ApiError:
     code, title, detail = _ACCESS_ERRORS[outcome]
     return ApiError(403, code, title, detail)
+
+
+async def check_new_password(s: AsyncSession, password: str, pointer: str) -> None:
+    """422 ``PASSWORD_TOO_LONG`` / ``PASSWORD_WEAK`` (detail: comma-joined problem codes)."""
+    if len(password) > MAX_PASSWORD_LENGTH:
+        raise ApiError(
+            422,
+            "PASSWORD_TOO_LONG",
+            "رمز عبور بیش از حد طولانی است",
+            f"رمز عبور نباید بیش از {MAX_PASSWORD_LENGTH} نویسه باشد.",
+            pointer,
+        )
+    min_length = int(await SettingsStore(s).get("auth.password_min_length"))
+    problems = password_problems(password, min_length)
+    if problems:
+        raise ApiError(422, "PASSWORD_WEAK", "رمز عبور ضعیف است", ",".join(problems), pointer)
 
 
 # --- restrictions -------------------------------------------------------------------------

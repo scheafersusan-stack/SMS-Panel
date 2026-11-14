@@ -1,30 +1,44 @@
-"""The signed-in user's own account: active sessions."""
+"""The signed-in user's own account: sessions, password, second factor, sign-in limits."""
 
+import ipaddress
+import logging
+import re
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from redis.asyncio import Redis
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from payamakyar.api import sessions
+from payamakyar.api import login, sessions
 from payamakyar.api.deps import (
     CurrentSession,
     SessionDep,
     client_ip,
     get_clock,
+    get_redis,
     get_settings_dep,
 )
 from payamakyar.api.errors import ApiError
+from payamakyar.api.routes.auth import Notifier
+from payamakyar.core.crypto import SecretBoxError
+from payamakyar.core.passwords import hash_password, verify_password
 from payamakyar.core.settings import PanelSettings
+from payamakyar.core.totp import new_totp_secret, totp_matching_step, totp_uri
 from payamakyar.db import audit
-from payamakyar.db.models import Session
+from payamakyar.db.models import Session, User
 
 router = APIRouter(prefix="/account", tags=["account"])
 
+log = logging.getLogger("payamakyar.api.account")
+
 Clock = Annotated[Callable[[], datetime], Depends(get_clock)]
+Settings = Annotated[PanelSettings, Depends(get_settings_dep)]
+RedisDep = Annotated[Redis, Depends(get_redis)]
 
 
 class SessionOut(BaseModel):
@@ -87,7 +101,7 @@ async def revoke_session(
     response: Response,
     s: SessionDep,
     clock: Clock,
-    settings: Annotated[PanelSettings, Depends(get_settings_dep)],
+    settings: Settings,
 ) -> None:
     row = (
         await s.execute(
@@ -113,3 +127,361 @@ async def revoke_session(
     )
     if row.id == current.id:
         sessions.clear_cookies(response, settings)
+
+
+# --- helpers ----------------------------------------------------------------------------
+
+TOTP_PENDING_TTL_SECONDS = 600
+Secret = Annotated[str, StringConstraints(min_length=1, max_length=1024)]
+Code = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=16)]
+
+
+async def _locked_user(s: AsyncSession, current: Session) -> User:
+    user = (
+        await s.execute(select(User).where(User.id == current.user_id).with_for_update())
+    ).scalar_one_or_none()
+    if user is None:
+        raise ApiError(401, "NOT_AUTHENTICATED", "ورود لازم است", "دوباره وارد حساب شوید.")
+    return user
+
+
+async def _reauthenticate(
+    s: AsyncSession,
+    user: User,
+    password: str,
+    *,
+    request: Request,
+    now: datetime,
+    pointer: str,
+) -> None:
+    """Check the account password again. A wrong one counts toward the login lockout (and is
+    committed before raising); while the account is locked even the right one is refused."""
+    if (until := login.locked_until(user, now)) is not None:
+        raise login.account_locked(until, now)
+    if verify_password(user.password_hash, password):
+        return
+    locked = await login.register_failure(s, user, now) == "locked"
+    ua = request.headers.get("user-agent")
+    await login.record_event(
+        s,
+        user_id=user.id,
+        tried=None,
+        ip=client_ip(request),
+        ua=ua,
+        outcome="locked" if locked else "reauth_failed",
+        at=now,
+    )
+    await s.commit()
+    raise ApiError(
+        400,
+        "CURRENT_PASSWORD_INVALID",
+        "رمز عبور فعلی نادرست است",
+        "رمز عبور فعلی را بررسی کنید.",
+        pointer,
+    )
+
+
+async def _audit_user(
+    s: AsyncSession,
+    user: User,
+    request: Request,
+    action: str,
+    *,
+    before: dict[str, Any] | None = None,
+    after: dict[str, Any] | None = None,
+) -> None:
+    await audit.record(
+        s,
+        actor_id=user.id,
+        actor_ip=client_ip(request) or None,
+        action=action,
+        target_type="user",
+        target_id=str(user.id),
+        before=before,
+        after=after,
+    )
+
+
+# --- password ---------------------------------------------------------------------------
+
+
+class PasswordChangeBody(BaseModel):
+    current_password: Secret
+    new_password: Secret
+
+
+@router.post("/password", status_code=204)
+async def change_password(
+    body: PasswordChangeBody,
+    current: CurrentSession,
+    request: Request,
+    s: SessionDep,
+    clock: Clock,
+    notifier: Notifier,
+) -> None:
+    now = clock()
+    await login.check_new_password(s, body.new_password, "/new_password")
+    user = await _locked_user(s, current)
+    await _reauthenticate(
+        s, user, body.current_password, request=request, now=now, pointer="/current_password"
+    )
+    user.password_hash = hash_password(body.new_password)
+    user.failed_logins = 0
+    revoked = await sessions.revoke_all(s, user.id, now=now, except_id=current.id)
+    await _audit_user(s, user, request, "user.password_change", after={"sessions_revoked": revoked})
+    await notifier.send_sms(s, user.mobile, "password_changed", {})
+
+
+# --- second factor ----------------------------------------------------------------------
+
+
+def _pending_key(user_id: uuid.UUID) -> str:
+    return f"mfa:totp:pending:{user_id}"
+
+
+class TotpSetup(BaseModel):
+    secret: str
+    otpauth_uri: str
+
+
+class TotpEnableBody(BaseModel):
+    code: Code
+
+
+class MfaDisableBody(BaseModel):
+    password: Secret
+
+
+@router.post("/mfa/totp/setup")
+async def totp_setup(
+    current: CurrentSession,
+    request: Request,
+    s: SessionDep,
+    settings: Settings,
+    redis: RedisDep,
+) -> TotpSetup:
+    """A new secret, kept sealed in Redis (``TOTP_PENDING_TTL_SECONDS``) until ``enable``
+    proves the authenticator has it; the active factor is unchanged until then."""
+    user = await _locked_user(s, current)
+    secret = new_totp_secret()
+    sealed = login.secret_box(settings).seal(secret)
+    await redis.set(_pending_key(user.id), sealed, ex=TOTP_PENDING_TTL_SECONDS)
+    await _audit_user(s, user, request, "user.mfa_setup", after={"method": "totp"})
+    return TotpSetup(secret=secret, otpauth_uri=totp_uri(secret, user.username))
+
+
+def _otp_invalid() -> ApiError:
+    return ApiError(400, "OTP_INVALID", "کد تأیید نامعتبر است", "کد واردشده درست نیست.", "/code")
+
+
+@router.post("/mfa/totp/enable", status_code=204)
+async def totp_enable(
+    body: TotpEnableBody,
+    current: CurrentSession,
+    request: Request,
+    s: SessionDep,
+    clock: Clock,
+    settings: Settings,
+    redis: RedisDep,
+) -> None:
+    now = clock()
+    user = await _locked_user(s, current)
+    raw = await redis.get(_pending_key(user.id))
+    if raw is None:
+        raise ApiError(
+            409,
+            "TOTP_SETUP_REQUIRED",
+            "راه‌اندازی برنامهٔ احراز هویت لازم است",
+            "ابتدا کد QR تازه بگیرید.",
+        )
+    sealed = raw.decode() if isinstance(raw, bytes) else str(raw)
+    try:
+        secret = login.secret_box(settings).open(sealed)
+    except SecretBoxError:
+        await redis.delete(_pending_key(user.id))
+        raise ApiError(
+            409,
+            "TOTP_SETUP_REQUIRED",
+            "راه‌اندازی برنامهٔ احراز هویت لازم است",
+            "ابتدا کد QR تازه بگیرید.",
+        ) from None
+    step = totp_matching_step(secret, body.code, at=now)
+    if step is None:
+        raise _otp_invalid()
+    before = {"method": user.mfa_method}
+    user.mfa_method = "totp"
+    user.totp_secret_sealed = sealed
+    user.totp_last_step = step  # the enable code cannot be replayed at sign-in
+    await _audit_user(s, user, request, "user.mfa_enable", before=before, after={"method": "totp"})
+    await s.flush()
+    await redis.delete(_pending_key(user.id))
+
+
+@router.post("/mfa/sms/enable", status_code=204)
+async def sms_enable(
+    current: CurrentSession,
+    request: Request,
+    s: SessionDep,
+    redis: RedisDep,
+) -> None:
+    user = await _locked_user(s, current)
+    if not user.mobile:
+        raise ApiError(
+            409, "MOBILE_REQUIRED", "شمارهٔ موبایل ثبت نشده است", "ابتدا شمارهٔ موبایل را ثبت کنید."
+        )
+    before = {"method": user.mfa_method}
+    user.mfa_method = "sms"
+    user.totp_secret_sealed = None
+    user.totp_last_step = None
+    await _audit_user(s, user, request, "user.mfa_enable", before=before, after={"method": "sms"})
+    await redis.delete(_pending_key(user.id))
+
+
+@router.post("/mfa/disable", status_code=204)
+async def mfa_disable(
+    body: MfaDisableBody,
+    current: CurrentSession,
+    request: Request,
+    s: SessionDep,
+    clock: Clock,
+    redis: RedisDep,
+) -> None:
+    now = clock()
+    user = await _locked_user(s, current)
+    await _reauthenticate(s, user, body.password, request=request, now=now, pointer="/password")
+    before = {"method": user.mfa_method}
+    user.mfa_method = "none"
+    user.totp_secret_sealed = None
+    user.totp_last_step = None
+    await _audit_user(s, user, request, "user.mfa_disable", before=before, after={"method": "none"})
+    await redis.delete(_pending_key(user.id))
+
+
+# --- sign-in restrictions ---------------------------------------------------------------
+
+MAX_ALLOWED_IPS = 50
+MAX_LOGIN_WINDOWS = 28
+_HHMM = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
+
+
+class LoginWindow(BaseModel):
+    """See ``payamakyar.api.login``: 0 = Saturday, Tehran time, ``to`` exclusive (may be
+    ``24:00``), no wrap past midnight."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    days: list[int] = Field(max_length=7)
+    from_: str = Field(alias="from", max_length=5)
+    to: str = Field(max_length=5)
+
+
+class SecurityBody(BaseModel):
+    login_notice: bool
+    allowed_ips: list[Annotated[str, StringConstraints(max_length=64)]] = Field(
+        max_length=MAX_ALLOWED_IPS
+    )
+    login_hours: list[LoginWindow] = Field(max_length=MAX_LOGIN_WINDOWS)
+
+
+class SecurityOut(BaseModel):
+    login_notice: bool
+    allowed_ips: list[str]
+    login_hours: list[LoginWindow]
+
+
+def _invalid(detail: str, pointer: str) -> ApiError:
+    return ApiError(422, "VALIDATION_FAILED", "داده‌های ارسالی نامعتبر است", detail, pointer)
+
+
+def _normalize_ips(items: list[str]) -> list[str]:
+    out: list[str] = []
+    for i, item in enumerate(items):
+        try:
+            net = ipaddress.ip_network(item.strip(), strict=False)
+        except ValueError:
+            raise _invalid("نشانی IP یا CIDR معتبر نیست.", f"/allowed_ips/{i}") from None
+        if str(net) not in out:
+            out.append(str(net))
+    return out
+
+
+def _minutes(value: str) -> int:
+    hours, minutes = value.split(":")
+    return int(hours) * 60 + int(minutes)
+
+
+def _normalize_windows(windows: list[LoginWindow]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for i, w in enumerate(windows):
+        base = f"/login_hours/{i}"
+        if not w.days or any(d < 0 or d > 6 for d in w.days):
+            raise _invalid("روزها باید از ۰ (شنبه) تا ۶ (جمعه) باشند.", f"{base}/days")
+        if not _HHMM.fullmatch(w.from_):
+            raise _invalid("ساعت شروع باید به شکل HH:MM باشد.", f"{base}/from")
+        if w.to != "24:00" and not _HHMM.fullmatch(w.to):
+            raise _invalid("ساعت پایان باید به شکل HH:MM یا 24:00 باشد.", f"{base}/to")
+        if _minutes(w.to) <= _minutes(w.from_):
+            raise _invalid("ساعت پایان باید بعد از ساعت شروع باشد.", f"{base}/to")
+        out.append({"days": sorted(set(w.days)), "from": w.from_, "to": w.to})
+    return out
+
+
+def _would_lock_out(pointer: str, detail: str) -> ApiError:
+    return ApiError(
+        422, "WOULD_LOCK_YOU_OUT", "این تنظیم دسترسی خود شما را می‌بندد", detail, pointer
+    )
+
+
+def _security_of(user: User) -> SecurityOut:
+    return SecurityOut(
+        login_notice=user.login_notice,
+        allowed_ips=[str(x) for x in user.allowed_ips or []],
+        login_hours=[LoginWindow.model_validate(w) for w in user.login_hours or []],
+    )
+
+
+def _snapshot(user: User) -> dict[str, Any]:
+    return {
+        "login_notice": user.login_notice,
+        "allowed_ips": [str(x) for x in user.allowed_ips or []],
+        "login_hours": list(user.login_hours or []),
+    }
+
+
+@router.get("/security")
+async def get_security(current: CurrentSession, s: SessionDep) -> SecurityOut:
+    user = await s.get(User, current.user_id)
+    if user is None:
+        raise ApiError(401, "NOT_AUTHENTICATED", "ورود لازم است", "دوباره وارد حساب شوید.")
+    return _security_of(user)
+
+
+@router.put("/security")
+async def put_security(
+    body: SecurityBody,
+    current: CurrentSession,
+    request: Request,
+    s: SessionDep,
+    clock: Clock,
+) -> SecurityOut:
+    """Empty lists lift a restriction. Refuses (422 ``WOULD_LOCK_YOU_OUT``) a non-empty
+    ``allowed_ips`` that excludes the caller's address, and a non-empty ``login_hours`` that
+    excludes the current Tehran time."""
+    now = clock()
+    ips = _normalize_ips(body.allowed_ips)
+    windows = _normalize_windows(body.login_hours)
+    ip = client_ip(request)
+    if ips and not login.ip_allowed(ips, ip):
+        raise _would_lock_out("/allowed_ips", "نشانی فعلی شما در فهرست مجاز نیست.")
+    if windows and not login.within_hours(windows, now):
+        raise _would_lock_out("/login_hours", "ساعت فعلی در بازه‌های مجاز نیست.")
+    user = await _locked_user(s, current)
+    before = _snapshot(user)
+    user.login_notice = body.login_notice
+    user.allowed_ips = ips or None
+    user.login_hours = windows or None
+    await s.flush()
+    await _audit_user(
+        s, user, request, "user.security_update", before=before, after=_snapshot(user)
+    )
+    return _security_of(user)

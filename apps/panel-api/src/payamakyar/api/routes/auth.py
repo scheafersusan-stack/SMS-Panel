@@ -1,5 +1,6 @@
 """Authentication routes: registration, login with an optional second factor, logout."""
 
+import hashlib
 import logging
 import re
 import uuid
@@ -33,7 +34,6 @@ from payamakyar.core.masking import mask_mobile
 from payamakyar.core.passwords import (
     hash_password,
     needs_rehash,
-    password_problems,
     verify_password,
 )
 from payamakyar.core.phone import InvalidMobile, normalize_mobile
@@ -47,7 +47,7 @@ log = logging.getLogger("payamakyar.api.auth")
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-MAX_PASSWORD_LENGTH = 128
+MAX_PASSWORD_LENGTH = login.MAX_PASSWORD_LENGTH
 CUSTOMER_ROLE = "customer"
 _USERNAME = re.compile(r"[A-Za-z0-9_.]{3,32}")
 _EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
@@ -212,18 +212,7 @@ async def register_complete(
         )
     # Validation that must not burn the one-time code comes before check().
     _validate_complete(body, kind)
-    if len(body.password) > MAX_PASSWORD_LENGTH:
-        raise ApiError(
-            422,
-            "PASSWORD_TOO_LONG",
-            "رمز عبور بیش از حد طولانی است",
-            f"رمز عبور نباید بیش از {MAX_PASSWORD_LENGTH} نویسه باشد.",
-            "/password",
-        )
-    min_length = int(await SettingsStore(s).get("auth.password_min_length"))
-    problems = password_problems(body.password, min_length)
-    if problems:
-        raise ApiError(422, "PASSWORD_WEAK", "رمز عبور ضعیف است", ",".join(problems), "/password")
+    await login.check_new_password(s, body.password, "/password")
     row = await otp.check(s, body.challenge_id, body.code, "register", now=now)
     user = User(
         kind="company" if kind == "company" else "person",
@@ -326,7 +315,7 @@ class MfaConfirmBody(BaseModel):
 
 
 def _box(settings: PanelSettings) -> SecretBox:
-    return SecretBox(settings.secret_key.get_secret_value().encode())
+    return login.secret_box(settings)
 
 
 async def _find_user(s: AsyncSession, tried: str) -> User | None:
@@ -615,3 +604,119 @@ async def logout(
         target_id=str(row.id),
     )
     sessions.clear_cookies(response, settings)
+
+
+# --- password reset ---------------------------------------------------------------------
+
+NewPassword = Annotated[str, StringConstraints(min_length=1, max_length=1024)]
+
+
+class ResetStartBody(BaseModel):
+    mobile: str
+
+
+class ResetCompleteBody(BaseModel):
+    challenge_id: uuid.UUID
+    code: Code
+    new_password: NewPassword
+
+
+def _reset_last_key(mobile: str) -> str:
+    return "reset:last:" + hashlib.sha256(mobile.encode()).hexdigest()
+
+
+async def _reset_resend_gate(redis: Redis, mobile: str, now: datetime, resend: int) -> None:
+    """One reset start per number per ``otp.resend_seconds``, the same for known and
+    unknown numbers (so a 429 never tells whether an account exists). The caller holds the
+    per-number advisory lock, which serialises the read and the write."""
+    key = _reset_last_key(mobile)
+    raw = await redis.get(key)
+    if raw is not None:
+        elapsed = now.timestamp() - float(raw)
+        if 0 <= elapsed < resend:
+            wait = max(int(resend - elapsed + 0.999), 1)
+            raise ApiError(
+                429,
+                "OTP_RESEND_TOO_SOON",
+                "ارسال مجدد کد هنوز ممکن نیست",
+                f"{wait} ثانیهٔ دیگر دوباره تلاش کنید.",
+                "/mobile",
+                headers={"Retry-After": str(wait)},
+            )
+    await redis.set(key, str(now.timestamp()), ex=resend + KIND_GRACE_SECONDS)
+
+
+@router.post("/reset/start", status_code=202)
+async def reset_start(
+    body: ResetStartBody,
+    request: Request,
+    s: SessionDep,
+    clock: Clock,
+    notifier: Notifier,
+    redis: Annotated[Redis, Depends(get_redis)],
+) -> StartResult:
+    """Always 202 with the same body: an unknown number gets a challenge id that was never
+    stored (it simply fails at ``reset/complete``) and no SMS."""
+    try:
+        mobile = normalize_mobile(body.mobile)
+    except InvalidMobile:
+        raise _invalid("شمارهٔ موبایل معتبر نیست.", "/mobile") from None
+    now = clock()
+    ip = client_ip(request)
+    store = SettingsStore(s)
+    limit = int(await store.get("otp.start_rate_per_ip_per_hour"))
+    limited = await RateLimiter(redis, lambda: now.timestamp()).hit(f"otp.start:{ip}", limit, 3600)
+    if not limited.allowed:
+        raise login.rate_limited(limited.retry_after)
+    await s.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": f"reset:{mobile}"})
+    resend = int(await store.get("otp.resend_seconds"))
+    await _reset_resend_gate(redis, mobile, now, resend)
+    user = (await s.execute(select(User).where(User.mobile == mobile))).scalar_one_or_none()
+    if user is None:
+        # Do the same database work as a real start, then roll it back: the response time
+        # and the (UUIDv7) id look the same as for a registered number.
+        nested = await s.begin_nested()
+        challenge_id, _ = await otp.issue(s, "reset", mobile, None, ip, now=now)
+        await nested.rollback()
+        return StartResult(challenge_id=challenge_id, resend_after=resend)
+    challenge_id, code = await otp.issue(s, "reset", mobile, user.id, ip, now=now)
+    await notifier.send_sms(s, mobile, "otp", {"code": code})
+    log.info("password reset code queued", extra={"user_id": str(user.id)})
+    return StartResult(challenge_id=challenge_id, resend_after=resend)
+
+
+@router.post("/reset/complete", status_code=204)
+async def reset_complete(
+    body: ResetCompleteBody,
+    request: Request,
+    s: SessionDep,
+    clock: Clock,
+    notifier: Notifier,
+) -> None:
+    now = clock()
+    ip = client_ip(request)
+    # Validation that must not burn the one-time code comes before check().
+    await login.check_new_password(s, body.new_password, "/new_password")
+    # check() commits a wrong attempt itself; nothing else is pending at this point.
+    row = await otp.check(s, body.challenge_id, body.code, "reset", now=now)
+    user = None
+    if row.user_id is not None:
+        user = (
+            await s.execute(select(User).where(User.id == row.user_id).with_for_update())
+        ).scalar_one_or_none()
+    if user is None or user.mobile != row.mobile:
+        raise _otp_invalid()
+    user.password_hash = hash_password(body.new_password)
+    user.failed_logins = 0
+    user.locked_until = None
+    revoked = await sessions.revoke_all(s, user.id, now=now)
+    await audit.record(
+        s,
+        actor_id=user.id,
+        actor_ip=ip or None,
+        action="user.password_reset",
+        target_type="user",
+        target_id=str(user.id),
+        after={"sessions_revoked": revoked},
+    )
+    await notifier.send_sms(s, user.mobile, "password_changed", {})
