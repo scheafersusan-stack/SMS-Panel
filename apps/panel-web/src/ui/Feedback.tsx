@@ -29,20 +29,23 @@ export function Badge({ tone = "neutral", dot = true, children }: { tone?: Badge
 
 export function Toast({ message, tone = "ok", onClose }: { message: string; tone?: "ok" | "bad"; onClose?: () => void }) {
   return (
-    <div className="toast-host">
-      <div className="ns-toast" role="status">
-        <span className={tone}>
-          <Icon name={tone === "ok" ? "check-circle" : "x-circle"} />
-        </span>
-        <span className="ns-toast-msg">{message}</span>
-        {onClose ? (
-          <button type="button" aria-label="بستن" onClick={onClose}>
-            <Icon name="x" size={16} />
-          </button>
-        ) : null}
-      </div>
+    <div className="ns-toast" role="status">
+      <span className={tone}>
+        <Icon name={tone === "ok" ? "check-circle" : "x-circle"} />
+      </span>
+      <span className="ns-toast-msg">{message}</span>
+      {onClose ? (
+        <button type="button" aria-label="بستن" onClick={onClose}>
+          <Icon name="x" size={16} />
+        </button>
+      ) : null}
     </div>
   );
+}
+
+/** The single fixed container all toasts stack in. */
+export function ToastHost({ children }: { children?: ReactNode }) {
+  return <div className="toast-host">{children}</div>;
 }
 
 export function Skeleton({ width = "100%", height = 14 }: { width?: string; height?: number }) {

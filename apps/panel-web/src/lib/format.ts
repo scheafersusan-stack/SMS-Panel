@@ -7,7 +7,9 @@ export function faDigits(n: number | string): string {
 }
 
 export function faNumber(n: number | string): string {
-  const s = String(n);
+  if (typeof n === "number" && !Number.isFinite(n)) return "—";
+  // BigInt keeps large integers out of exponent form.
+  const s = typeof n === "number" && Number.isInteger(n) ? BigInt(n).toString() : String(n);
   const m = /^(-?)(\d+)(\.\d+)?$/.exec(s);
   if (!m) return faDigits(s);
   const grouped = (m[2] ?? "").replace(/\B(?=(\d{3})+(?!\d))/g, THOUSANDS);
@@ -55,8 +57,8 @@ export function jalaliDateTime(d: Date | string): string {
 
 export type MoneyUnit = "ریال" | "تومان";
 
-/** Amounts are stored in rials; toman is rials / 10. */
+/** Amounts are stored in rials; toman is rials / 10, rounded to the nearest toman (half away from zero). */
 export function money(rials: number, unit: MoneyUnit = "ریال"): string {
-  const v = unit === "تومان" ? Math.trunc(rials / 10) : rials;
+  const v = unit === "تومان" ? Math.round(rials / 10) : rials;
   return `${faNumber(v)} ${unit}`;
 }

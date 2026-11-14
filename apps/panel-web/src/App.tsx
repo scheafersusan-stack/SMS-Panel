@@ -2,7 +2,6 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { restoreTheme } from "@/lib/theme";
 import { DEFAULT_ROUTE, ROUTES, routeFromHash } from "@/routes";
 import { Shell } from "@/shell/Shell";
 import { Placeholder } from "@/views/Placeholder";
@@ -22,7 +21,6 @@ export function App() {
   const [client] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } } }));
   const route = useRoute();
   const role = ROUTES[route]?.role ?? "user";
-  useEffect(() => restoreTheme(), []);
   useEffect(() => window.scrollTo?.(0, 0), [route]);
 
   // Later tasks swap Placeholder for the real screen of each route.

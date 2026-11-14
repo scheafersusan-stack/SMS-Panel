@@ -11,6 +11,9 @@ describe("format", () => {
     expect(faNumber(1845000)).toBe("۱٬۸۴۵٬۰۰۰");
     expect(faNumber(-1240)).toBe("-۱٬۲۴۰");
     expect(faNumber(12)).toBe("۱۲");
+    expect(faNumber(NaN)).toBe("—");
+    expect(faNumber(Infinity)).toBe("—");
+    expect(faNumber(1e21)).toBe("۱٬۰۰۰٬۰۰۰٬۰۰۰٬۰۰۰٬۰۰۰٬۰۰۰٬۰۰۰");
     expect(faNumber("1240")).toBe("۱٬۲۴۰");
   });
   it("formats Jalali dates in the Tehran zone", () => {
@@ -26,5 +29,6 @@ describe("format", () => {
     expect(money(1845000)).toBe("۱٬۸۴۵٬۰۰۰ ریال");
     expect(money(1845000, "ریال")).toBe("۱٬۸۴۵٬۰۰۰ ریال");
     expect(money(1845000, "تومان")).toBe("۱۸۴٬۵۰۰ تومان");
+    expect(money(1845005, "تومان")).toBe("۱۸۴٬۵۰۱ تومان");
   });
 });

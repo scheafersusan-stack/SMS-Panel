@@ -5,7 +5,7 @@ import { Icon } from "@/ui/Icon";
 export function Sidebar({ role, route, onNavigate }: { role: "user" | "admin"; route: string; onNavigate: () => void }) {
   const current = ROUTES[route]?.navParent ?? route;
   return (
-    <nav className="ns-sidebar" aria-label="منوی اصلی">
+    <nav className="ns-sidebar" id="main-nav" aria-label="منوی اصلی">
       <div className="ns-brand">
         <span className="ns-brand-mark">
           <Icon name="send" />

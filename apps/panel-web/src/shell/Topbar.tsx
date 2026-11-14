@@ -1,9 +1,9 @@
 import { Icon } from "@/ui/Icon";
 
-export function Topbar({ role, onMenu, onTheme }: { role: "user" | "admin"; onMenu: () => void; onTheme: () => void }) {
+export function Topbar({ role, open, dark, onMenu, onTheme }: { role: "user" | "admin"; open: boolean; dark: boolean; onMenu: () => void; onTheme: () => void }) {
   return (
     <header className="ns-topbar">
-      <button type="button" className="ns-btn ns-btn-ghost ns-btn-icon menu-btn" aria-label="منو" onClick={onMenu}>
+      <button type="button" className="ns-btn ns-btn-ghost ns-btn-icon menu-btn" id="menu-btn" aria-label="منو" aria-expanded={open} aria-controls="main-nav" onClick={onMenu}>
         <Icon name="menu" />
       </button>
       <div className="ns-seg role-switch" role="group" aria-label="پنل">
@@ -29,14 +29,14 @@ export function Topbar({ role, onMenu, onTheme }: { role: "user" | "admin"; onMe
           </span>
         </a>
       ) : null}
-      <button type="button" className="ns-btn ns-btn-ghost ns-btn-icon" aria-label="تغییر تم" onClick={onTheme}>
+      <button type="button" className="ns-btn ns-btn-ghost ns-btn-icon" aria-label="تغییر تم" aria-pressed={dark} onClick={onTheme}>
         <Icon name="eye" />
       </button>
       <a className="ns-btn ns-btn-ghost ns-btn-icon" aria-label="اعلان‌ها" href="#u-notifications">
         <Icon name="bell" />
       </a>
       <span className="ns-avatar" aria-hidden="true">
-        {role === "admin" ? "م" : "ک"}
+        {role === "admin" ? "ک" : "م"}
       </span>
     </header>
   );

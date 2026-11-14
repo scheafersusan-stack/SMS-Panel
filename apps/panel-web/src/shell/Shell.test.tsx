@@ -46,6 +46,7 @@ describe("Shell", () => {
     await userEvent.click(screen.getByRole("button", { name: "تغییر تم" }));
     const first = document.documentElement.getAttribute("data-theme");
     expect(["light", "dark"]).toContain(first);
+    expect(screen.getByRole("button", { name: "تغییر تم" })).toHaveAttribute("aria-pressed", String(first === "dark"));
     expect(window.localStorage.getItem("pk_theme")).toBe(first);
     await userEvent.click(screen.getByRole("button", { name: "تغییر تم" }));
     expect(document.documentElement.getAttribute("data-theme")).not.toBe(first);
@@ -60,8 +61,25 @@ describe("Shell", () => {
     expect(app).not.toHaveClass("nav-open");
     await userEvent.click(screen.getByRole("button", { name: "منو" }));
     expect(app).toHaveClass("nav-open");
+    expect(screen.getByRole("button", { name: "منو" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "منو" })).toHaveAttribute("aria-controls", "main-nav");
     await userEvent.click(screen.getByRole("link", { name: /ارسال سریع/ }));
     expect(app).not.toHaveClass("nav-open");
+    expect(screen.getByRole("button", { name: "منو" })).toHaveAttribute("aria-expanded", "false");
+  });
+  it("moves focus into the drawer and Escape returns it to the menu button", async () => {
+    const { container } = render(
+      <Shell role="user" route="u-dashboard">
+        <p>x</p>
+      </Shell>,
+    );
+    const menu = screen.getByRole("button", { name: "منو" });
+    await userEvent.click(menu);
+    expect(document.querySelector("#main-nav a")).toHaveFocus();
+    await userEvent.keyboard("{Escape}");
+    expect(container.querySelector(".app")).not.toHaveClass("nav-open");
+    expect(menu).toHaveFocus();
+    expect(menu).toHaveAttribute("aria-expanded", "false");
   });
 });
 
