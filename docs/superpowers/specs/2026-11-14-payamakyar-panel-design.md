@@ -51,8 +51,9 @@ and, where it has a screen, the screen works against the real API.
 
 ## Anti-goals (failure even if it "works")
 
-- Any path — retry, timeout, unknown verdict, scheduled release, OTP/pattern fast path, SMPP,
-  admin resend — that sends to an upstream without a final `ALLOW` for that exact content.
+- Any path — retry, timeout, unknown verdict, scheduled release, SMPP, admin resend — that sends
+  to an upstream without a final `ALLOW` for that exact content, unless the batch carries a
+  recorded exemption (pattern send, or an admin guard-policy rule).
 - A balance that can be changed without a ledger row, or a refund issued twice.
 - Upstream credentials, API keys, OTP codes or full message bodies in logs.
 - A screen in the prototype that is a dead mock in the product.
@@ -117,10 +118,19 @@ packages/panel-connectors
   router accepts only batches whose guard state is `ALLOWED` with `decision.final.is_final=true`
   and `verdict=ALLOW` *and* whose content hash equals the hash that was registered. Any other
   value, missing field or unknown enum from sms-guard leaves the batch held.
-- **sms-guard integration.** One guard registration per *content unit*: the batch text for
-  single/bulk/phonebook sends; each distinct rendered text for peer-to-peer and variable sends
-  (deduplicated; recipients counted per unit); a pattern's text at pattern approval time, and
-  per-send only when a variable value contains a URL, a phone number or exceeds its type rules.
+- **sms-guard integration.** Owner's rule (2026-11-14): every send goes to sms-guard **except
+  pattern (الگو) sends**; admins can widen the exemptions. One guard registration per *content
+  unit*: the batch text for single/bulk/phonebook sends; each distinct rendered text for
+  peer-to-peer and variable sends (deduplicated; recipients counted per unit). A pattern's text is
+  registered once when the pattern is submitted for approval, and the pattern cannot become
+  `active` without that `ALLOW` (my call); its per-send values are not sent to sms-guard, but are
+  bounded by the pattern's typed, length-capped variables.
+  **Guard policy (admin-editable, every change audited, defaults = no exemption beyond patterns):**
+  an ordered list of exemption rules, each with any of: specific users (whole account exempt),
+  reseller subtree, line(s), message class, recipient count below N, account tier/package, and
+  validity dates. A batch matching an active rule skips sms-guard and is marked
+  `guard_exempt(rule id)` on the batch, outbox and evidence record. A global switch can also turn
+  pattern exemption off (pattern sends then go to sms-guard per send like any other text).
   Registration uses `Idempotency-Key = panel content unit id`, `account` (customer id, name,
   tier, and `tags` carrying `reseller:<id>` for each ancestor and `class:<message class>`, since
   sms-guard's `Account` accepts no extra fields), `sender.line` and `sender.line_type`
@@ -236,7 +246,7 @@ ported), Jalali date library choice.
 - Number-bank data is admin-imported.
 - PostgreSQL job table instead of Redis Streams for panel work (money and holds need
   transactional enqueue; sms-guard's ADR 0001 reasoning does not carry over).
-- Guard registration per content unit as described above, including the pattern fast path.
+- Guard registration per content unit; pattern text checked by sms-guard at approval time.
 - sms-guard field mapping (`line_type` values, reseller chain and class in `tags`), 2000-char
   refusal and the 24 h approval validity for scheduled sends.
 - Provider connectors are built from their public documentation and contract-built fakes; each is
@@ -372,6 +382,7 @@ routes (§9). Phase is the delivery phase above.
 | F8.3 | Documents catalog (data-driven: needs file, count, expires after, show on profile, sample files) | a-settings | 6 |
 | F8.4 | Pattern queue with revision diff, approve/reject with comment, SMS notice | a-patterns | 6 |
 | F8.5 | Send moderation queue: "awaiting send approval" for batches and schedules, users' manual outbox, auto-approve bulk flag per upstream, reject comment; sms-guard review status visible | a-moderation | 6 |
+| F8.20 | Guard policy: exemption rules (users, reseller subtree, lines, class, recipient count < N, tier, dates), pattern-exemption switch, audit of changes, exempt marker on batches | a-settings, a-moderation | 6 |
 | F8.6 | Content filter word/regex table, check-filter flag per line, "filtered" status, pre-test of a text | a-settings, a-moderation | 2, 6 |
 | F8.7 | Line inventory: define, assign, renew, status, keywords, relays | a-lines | 6 |
 | F8.8 | Upstreams: name, type (sms/voice/email), send/receive/bulk enabled, send window, queue length, SMPP flag, credentials, links, default number, balance | a-upstreams | 6 |
