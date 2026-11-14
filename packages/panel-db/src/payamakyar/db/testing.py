@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 
 import asyncpg
@@ -22,7 +22,7 @@ import pytest
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from payamakyar.db import migrate
+from payamakyar.db import audit, migrate
 from payamakyar.db.engine import async_url, create_engine, session_factory
 
 _BINDIR_DEFAULT = Path("/usr/lib/postgresql/16/bin")
@@ -205,4 +205,36 @@ def redis_url() -> Iterator[str]:
             proc.wait(timeout=10)
 
 
-__all__ = ["async_url", "db_session", "db_url", "pg_url", "redis_url", "with_database"]
+class _WithTestActions(frozenset[str]):
+    """``AUDIT_ACTIONS`` plus any action under the given test prefixes."""
+
+    prefixes: tuple[str, ...] = ()
+
+    def __contains__(self, item: object) -> bool:
+        if frozenset.__contains__(self, item):
+            return True
+        return isinstance(item, str) and bool(self.prefixes) and item.startswith(self.prefixes)
+
+
+@pytest.fixture
+def allow_test_audit_actions(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    """``allow("t.", "page.")`` lets this test record made-up actions under those prefixes;
+    the real registry is restored afterwards."""
+
+    def allow(*prefixes: str) -> None:
+        registry = _WithTestActions(audit.AUDIT_ACTIONS)
+        registry.prefixes = prefixes
+        monkeypatch.setattr(audit, "AUDIT_ACTIONS", registry)
+
+    return allow
+
+
+__all__ = [
+    "allow_test_audit_actions",
+    "async_url",
+    "db_session",
+    "db_url",
+    "pg_url",
+    "redis_url",
+    "with_database",
+]

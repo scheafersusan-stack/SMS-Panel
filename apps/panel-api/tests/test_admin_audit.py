@@ -1,6 +1,7 @@
 import base64
 import itertools
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -15,6 +16,13 @@ from payamakyar.db import audit
 from payamakyar.db.models import AuditEvent, LoginEvent, Role, RolePermission, User, UserRole
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(autouse=True)
+def _test_actions(allow_test_audit_actions: Callable[..., None]) -> None:
+    # The seeds use made-up actions so each test can filter its own rows.
+    allow_test_audit_actions("page.", "exact.", "f.", "t.", "v.")
+
 
 AUDIT = "/panel/admin/v1/audit"
 LOGINS = "/panel/admin/v1/login-events"

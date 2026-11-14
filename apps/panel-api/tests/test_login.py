@@ -222,6 +222,16 @@ async def test_lockout_after_five_and_sixth_correct_still_423(
     assert r.status_code == 401
     fresh = await _get_user(app, user.id)
     assert fresh.locked_until == clock.now + timedelta(seconds=900)
+    async with app.state.session_factory() as s:
+        lock = (
+            await s.execute(
+                select(AuditEvent).where(
+                    AuditEvent.action == "user.lock", AuditEvent.target_id == str(user.id)
+                )
+            )
+        ).scalar_one()
+    assert (lock.actor_id, lock.target_type) == (None, "user")
+    assert lock.after == {"locked_until": fresh.locked_until.isoformat()}
     r = await _login(client, user.username)  # 6th attempt, correct password
     assert r.status_code == 423
     assert _err(r) == "ACCOUNT_LOCKED"

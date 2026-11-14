@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import itertools
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 import asyncpg
 import pytest
@@ -17,6 +17,11 @@ from payamakyar.db.models import AuditEvent
 from payamakyar.db.testing import _admin, with_database
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(autouse=True)
+def _test_actions(allow_test_audit_actions: Callable[..., None]) -> None:
+    allow_test_audit_actions("t.")
 
 
 async def _rec(s: AsyncSession, action: str = "t.action", **kw: object) -> int:

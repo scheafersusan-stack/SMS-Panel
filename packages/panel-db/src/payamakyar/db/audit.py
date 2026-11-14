@@ -23,7 +23,43 @@ GENESIS_HASH = "0" * 64
 ADVISORY_LOCK_KEY = 7701
 BATCH_SIZE = 1000
 
-__all__ = ["GENESIS_HASH", "canonical_json", "compute_hash", "record", "verify_chain"]
+AUDIT_ACTIONS: frozenset[str] = frozenset(
+    {
+        # sign-in and sessions
+        "user.register",
+        "user.login",
+        "user.lock",
+        "session.logout",
+        "session.revoke",
+        # the account owner
+        "user.password_change",
+        "user.password_reset_requested",
+        "user.password_reset",
+        "user.profile_update",
+        "user.mfa_setup",
+        "user.mfa_enable",
+        "user.mfa_disable",
+        "user.security_update",
+        # staff and operations
+        "user.create_admin",
+        "user.roles.update",
+        "role.create",
+        "role.update",
+        "role.delete",
+        "settings.update",
+    }
+)
+"""Every action ``record`` accepts; a new action is added here first
+(``tests/test_audit_actions.py`` checks each call site against it)."""
+
+__all__ = [
+    "AUDIT_ACTIONS",
+    "GENESIS_HASH",
+    "canonical_json",
+    "compute_hash",
+    "record",
+    "verify_chain",
+]
 
 
 def canonical_json(fields: dict[str, Any]) -> str:
@@ -106,6 +142,9 @@ async def record(
     after: dict[str, Any] | None = None,
     reason: str | None = None,
 ) -> int:
+    """Append one row; raises ``ValueError`` for an action missing from ``AUDIT_ACTIONS``."""
+    if action not in AUDIT_ACTIONS:
+        raise ValueError(f"unknown audit action: {action!r}")
     target_id, reason = _clean_text(target_id), _clean_text(reason)
     await s.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": ADVISORY_LOCK_KEY})
     prev_hash = (

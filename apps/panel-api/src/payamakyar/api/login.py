@@ -29,6 +29,7 @@ from payamakyar.core.crypto import SecretBox, SecretBoxError
 from payamakyar.core.jalali import TEHRAN, to_persian_digits
 from payamakyar.core.passwords import hash_password, password_problems
 from payamakyar.core.settings import PanelSettings
+from payamakyar.db import audit
 from payamakyar.db.models import LoginEvent, User
 from payamakyar.db.settings_store import SettingsStore
 
@@ -226,7 +227,8 @@ async def register_failure(s: AsyncSession, user: User, now: datetime) -> str:
     The increment and the lock are single SQL statements, so concurrent failures are never
     lost even when the caller no longer holds the row lock (``otp.check`` commits). The n-th
     lock since the last successful login lasts ``lockout_seconds * 2**(n-1)``, capped at
-    86400 s; the lock count is derived from ``login_events`` (outcome ``locked``).
+    86400 s; the lock count is derived from ``login_events`` (outcome ``locked``). A lock is
+    audited as ``user.lock`` (no actor) in the caller's transaction.
     """
     store = SettingsStore(s)
     max_tries = int(await store.get("auth.max_failed_tries"))
@@ -259,6 +261,15 @@ async def register_failure(s: AsyncSession, user: User, now: datetime) -> str:
         return "failed"
     set_committed_value(user, "failed_logins", 0)
     set_committed_value(user, "locked_until", until)
+    await audit.record(
+        s,
+        actor_id=None,
+        actor_ip=None,
+        action="user.lock",
+        target_type="user",
+        target_id=str(user.id),
+        after={"locked_until": until.isoformat()},
+    )
     return "locked"
 
 
