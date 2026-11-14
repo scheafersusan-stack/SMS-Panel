@@ -13,6 +13,7 @@ from payamakyar.api import otp
 from payamakyar.api.deps import get_clock
 from payamakyar.core.passwords import hash_password, verify_password
 from payamakyar.db.models import AuditEvent, OtpChallenge, Session, SystemMessage, User
+from payamakyar.db.testing import flush_test_redis
 
 pytestmark = pytest.mark.integration
 
@@ -39,7 +40,7 @@ class Clock:
 
 @pytest.fixture(autouse=True)
 async def _reset_redis(app: FastAPI) -> None:
-    await app.state.redis.flushdb()
+    await flush_test_redis(app.state.redis)
 
 
 @pytest.fixture

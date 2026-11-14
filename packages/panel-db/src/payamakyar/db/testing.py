@@ -3,6 +3,13 @@
 ``pg_url`` uses ``PAYAMAKYAR_TEST_DATABASE_URL`` (a superuser URL to an existing server) or
 starts a throwaway cluster with ``initdb``/``pg_ctl``. When running as root, initdb is run as
 the ``postgres`` OS user (or ``nobody``) inside a directory that user owns.
+
+``redis_url`` uses ``PAYAMAKYAR_TEST_REDIS_URL`` (db 15 when the URL names none; db 0 is
+refused because tests flush their db) or starts a throwaway ``redis-server``. Tests empty
+Redis only through ``flush_test_redis``, which refuses db 0.
+
+Without the servers or binaries the integration tests skip, unless
+``PAYAMAKYAR_TEST_REQUIRE_SERVICES=1`` (CI, ``make ci``) turns the skip into a failure.
 """
 
 import asyncio
@@ -16,6 +23,8 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
+from typing import Any, NoReturn
+from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 import pytest
@@ -26,6 +35,37 @@ from payamakyar.db import audit, migrate
 from payamakyar.db.engine import async_url, create_engine, session_factory
 
 _BINDIR_DEFAULT = Path("/usr/lib/postgresql/16/bin")
+TEST_REDIS_DB = 15
+REQUIRE_SERVICES_ENV = "PAYAMAKYAR_TEST_REQUIRE_SERVICES"
+
+
+def service_unavailable(reason: str) -> NoReturn:
+    """Skip, or fail when ``PAYAMAKYAR_TEST_REQUIRE_SERVICES=1`` (CI must not skip)."""
+    if os.environ.get(REQUIRE_SERVICES_ENV, "") == "1":
+        pytest.fail(f"{reason} ({REQUIRE_SERVICES_ENV}=1)", pytrace=False)
+    pytest.skip(reason)
+
+
+def redis_test_url(url: str) -> str:
+    """``url`` with db 15 when it names no db; a URL naming db 0 is refused."""
+    parsed = urlsplit(url)
+    path = parsed.path.strip("/")
+    if not path:
+        return urlunsplit(parsed._replace(path=f"/{TEST_REDIS_DB}"))
+    if path == "0":
+        raise pytest.UsageError(
+            "PAYAMAKYAR_TEST_REDIS_URL names db 0: tests flush their Redis db, so point it at "
+            f"a dedicated one (default /{TEST_REDIS_DB})"
+        )
+    return url
+
+
+async def flush_test_redis(redis: Any) -> None:
+    """``FLUSHDB`` on the test Redis, refusing db 0 (which may hold real data)."""
+    db = int(redis.connection_pool.connection_kwargs.get("db", 0) or 0)
+    if db == 0:
+        raise RuntimeError("refusing to flush Redis db 0 in tests; use a dedicated db")
+    await redis.flushdb()
 
 
 def _free_port() -> int:
@@ -45,7 +85,9 @@ def _bindir() -> Path:
             check=True,
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
-        pytest.skip("PostgreSQL binaries not found and PAYAMAKYAR_TEST_DATABASE_URL not set")
+        service_unavailable(
+            "PostgreSQL binaries not found and PAYAMAKYAR_TEST_DATABASE_URL not set"
+        )
     return Path(out)
 
 
@@ -59,7 +101,7 @@ def _os_user() -> str | None:
         except KeyError:
             continue
         return name
-    pytest.skip("running as root and no unprivileged user (postgres/nobody) exists")
+    service_unavailable("running as root and no unprivileged user (postgres/nobody) exists")
 
 
 def with_database(url: str, name: str) -> str:
@@ -177,11 +219,11 @@ async def db_session(db_url: str) -> AsyncIterator[AsyncSession]:
 def redis_url() -> Iterator[str]:
     env = os.environ.get("PAYAMAKYAR_TEST_REDIS_URL")
     if env:
-        yield env
+        yield redis_test_url(env)
         return
     exe = shutil.which("redis-server")
     if exe is None:
-        pytest.skip("redis-server not found and PAYAMAKYAR_TEST_REDIS_URL not set")
+        service_unavailable("redis-server not found and PAYAMAKYAR_TEST_REDIS_URL not set")
     port = _free_port()
     with tempfile.TemporaryDirectory(prefix="payamakyar-redis-") as tmp:
         proc = subprocess.Popen(  # noqa: S603
@@ -199,7 +241,7 @@ def redis_url() -> Iterator[str]:
                     if time.monotonic() > deadline or proc.poll() is not None:
                         pytest.fail("redis-server did not become reachable within 10s")
                     time.sleep(0.05)
-            yield f"redis://127.0.0.1:{port}/0"
+            yield f"redis://127.0.0.1:{port}/{TEST_REDIS_DB}"
         finally:
             proc.terminate()
             proc.wait(timeout=10)
@@ -234,7 +276,10 @@ __all__ = [
     "async_url",
     "db_session",
     "db_url",
+    "flush_test_redis",
     "pg_url",
+    "redis_test_url",
     "redis_url",
+    "service_unavailable",
     "with_database",
 ]

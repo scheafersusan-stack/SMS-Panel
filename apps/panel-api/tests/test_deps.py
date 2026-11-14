@@ -1,9 +1,12 @@
+from typing import Any
+
 import httpx
 import pytest
 from fastapi import FastAPI
 from sqlalchemy import select
 
-from payamakyar.api.deps import SessionDep
+from payamakyar.api import csrf
+from payamakyar.api.deps import SessionDep, current_session
 from payamakyar.api.errors import ApiError
 from payamakyar.db.models import SystemMessage
 
@@ -57,3 +60,61 @@ async def test_commit_failure_is_not_2xx(app: FastAPI, client: httpx.AsyncClient
     assert r.status_code == 500
     assert r.json()["error"]["code"] == "INTERNAL"
     assert await _count(app, "dep_commit") == 0
+
+
+# --- CSRF coverage ----------------------------------------------------------------------
+
+UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
+# Unsafe routes outside the CSRF check (no session exists yet; see ``payamakyar.api.csrf``).
+EXPECTED_EXEMPT = {
+    ("POST", "/panel/web/v1/auth/login"),
+    ("POST", "/panel/web/v1/auth/register/start"),
+    ("POST", "/panel/web/v1/auth/register/complete"),
+    ("POST", "/panel/web/v1/auth/mfa/sms/send"),
+    ("POST", "/panel/web/v1/auth/mfa/confirm"),
+    ("POST", "/panel/web/v1/auth/reset/start"),
+    ("POST", "/panel/web/v1/auth/reset/complete"),
+}
+
+
+def _route_contexts(app: FastAPI) -> list[tuple[str, set[str], Any]]:
+    """(path, methods, dependant) of every API route, nested routers included."""
+    found: list[tuple[str, set[str], Any]] = []
+
+    def walk(routes: Any, prefix: str = "") -> None:
+        for r in routes:
+            if hasattr(r, "effective_route_contexts"):
+                found.extend(
+                    (c.path, set(c.methods or ()), c.dependant)
+                    for c in r.effective_route_contexts()
+                )
+            elif hasattr(r, "dependant"):
+                found.append((prefix + r.path, set(r.methods or ()), r.dependant))
+            elif hasattr(r, "routes"):
+                walk(r.routes, prefix + getattr(r, "path", ""))
+
+    walk(app.routes)
+    return found
+
+
+def _calls(dependant: Any) -> set[Any]:
+    found = {dependant.call}
+    for d in dependant.dependencies:
+        found |= _calls(d)
+    return found
+
+
+def test_every_unsafe_route_is_csrf_bound_to_the_session(app: FastAPI) -> None:
+    """Outside the exempt set, an unsafe route must depend on ``current_session`` (which binds
+    the CSRF header to the session), not only pass the double-submit middleware."""
+    exempt: set[tuple[str, str]] = set()
+    checked = 0
+    for path, methods, dependant in _route_contexts(app):
+        for method in methods & UNSAFE:
+            if not csrf.is_protected(method, path):
+                exempt.add((method, path))
+                continue
+            checked += 1
+            assert current_session in _calls(dependant), (method, path)
+    assert checked >= 10
+    assert exempt == EXPECTED_EXEMPT

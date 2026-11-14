@@ -6,7 +6,12 @@
 - Docker with the compose plugin (only for the full stack)
 - For the test suite without Docker: PostgreSQL 16 binaries (`initdb`, `pg_ctl`) and `redis-server`
   on the machine, or `PAYAMAKYAR_TEST_DATABASE_URL` / `PAYAMAKYAR_TEST_REDIS_URL` pointing at
-  running servers. Integration tests skip when neither is available.
+  running servers. Integration tests skip when neither is available, except under
+  `PAYAMAKYAR_TEST_REQUIRE_SERVICES=1` (set by `make ci` and the CI workflow), where a missing
+  service fails the run.
+- The API tests flush their Redis db. `PAYAMAKYAR_TEST_REDIS_URL` therefore defaults to db 15
+  when it names none (`redis://localhost:6379` means `/15`), and a URL naming db 0 is refused;
+  never point it at a Redis that holds data you need.
 
 ## Everyday gates
 
@@ -17,7 +22,8 @@ make web-ci         # npm ci, eslint, tsc, vitest, next build (+ CSP hash step)
 make ci-all         # both
 ```
 
-`make test-unit` runs without Postgres/Redis. `make test-integration` runs only the `integration`
+`make ci` sets `PAYAMAKYAR_TEST_REQUIRE_SERVICES=1`; plain `make test` lets integration tests skip
+when Postgres/Redis are missing. `make test-unit` runs without Postgres/Redis. `make test-integration` runs only the `integration`
 marker. The end-to-end smoke test is `tests/e2e/test_smoke.py`.
 
 ## Full stack (Docker)

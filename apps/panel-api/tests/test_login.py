@@ -18,6 +18,7 @@ from payamakyar.core.crypto import SecretBox
 from payamakyar.core.passwords import hash_password, verify_password
 from payamakyar.db.models import AuditEvent, LoginEvent, Session, SystemMessage, User
 from payamakyar.db.settings_store import SettingsStore
+from payamakyar.db.testing import flush_test_redis
 
 pytestmark = pytest.mark.integration
 
@@ -48,7 +49,7 @@ class Clock:
 
 @pytest.fixture(autouse=True)
 async def _reset_redis(app: FastAPI) -> None:
-    await app.state.redis.flushdb()
+    await flush_test_redis(app.state.redis)
 
 
 @pytest.fixture

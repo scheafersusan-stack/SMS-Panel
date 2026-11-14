@@ -20,6 +20,7 @@ from payamakyar.core.passwords import password_problems
 from payamakyar.core.settings import PanelSettings
 from payamakyar.db.audit import verify_chain
 from payamakyar.db.models import SystemMessage
+from payamakyar.db.testing import flush_test_redis
 
 pytestmark = pytest.mark.integration
 
@@ -35,7 +36,7 @@ async def app(db_url: str, redis_url: str) -> AsyncIterator[FastAPI]:
     )
     application = create_app(settings)
     async with application.router.lifespan_context(application):
-        await application.state.redis.flushdb()
+        await flush_test_redis(application.state.redis)
         yield application
 
 

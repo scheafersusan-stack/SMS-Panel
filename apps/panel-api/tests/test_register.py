@@ -21,6 +21,7 @@ from payamakyar.db.models import (
     UserRole,
 )
 from payamakyar.db.settings_store import SettingsStore
+from payamakyar.db.testing import flush_test_redis
 
 pytestmark = pytest.mark.integration
 
@@ -42,7 +43,7 @@ class Clock:
 @pytest.fixture(autouse=True)
 async def _reset_redis(app: FastAPI) -> None:
     # Frozen clocks reuse the same rate-limit window across tests.
-    await app.state.redis.flushdb()
+    await flush_test_redis(app.state.redis)
 
 
 @pytest.fixture

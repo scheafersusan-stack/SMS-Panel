@@ -41,7 +41,8 @@ test-unit: ## tests that need no Postgres/Redis/web build
 test-integration: ## tests that need Postgres and Redis
 	$(UV) run pytest -m integration $(ARGS)
 
-ci: lint typecheck test ## python gate
+ci: export PAYAMAKYAR_TEST_REQUIRE_SERVICES := 1
+ci: lint typecheck test ## python gate (missing Postgres/Redis fail instead of skipping)
 
 web-install: ## npm ci in apps/panel-web
 	@if [ -f $(WEB)/package.json ]; then npm --prefix $(WEB) ci; else echo "apps/panel-web not created yet"; fi
