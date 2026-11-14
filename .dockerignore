@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+.superpowers
+.worktrees
+.build
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/node_modules
+apps/panel-web/dist
+apps/panel-web/.next
+apps/panel-web/.csp
+.env
+infra/.env
+docs

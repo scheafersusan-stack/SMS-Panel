@@ -12,15 +12,15 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = { width: "device-width", initialScale: 1 };
 
-// Applies the stored theme before first paint (no flash); storage may be blocked.
-const THEME_SCRIPT =
-  'try{var t=localStorage.getItem("pk_theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}';
+// The pre-paint theme script is a static file (public/theme-init.js) so CSP needs no hash for it.
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="fa" dir="rtl" suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
+        {/* Intentionally synchronous: must run before first paint to avoid a theme flash. */}
+        {/* eslint-disable-next-line @next/next/no-sync-scripts */}
+        <script src="/theme-init.js" />
       </head>
       <body>{children}</body>
     </html>

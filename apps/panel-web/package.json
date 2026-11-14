@@ -11,6 +11,7 @@
     "dev": "next dev",
     "icons": "node scripts/gen-icons.mjs",
     "build": "next build",
+    "postbuild": "node scripts/csp-hashes.mjs",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

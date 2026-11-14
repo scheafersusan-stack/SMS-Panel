@@ -25,7 +25,7 @@ log = logging.getLogger("payamakyar.db.jobs")
 DEFAULT_RETRY_SCHEDULE: tuple[float, ...] = (1, 5, 30, 120, 600, 1800, 3600, 7200)
 MAX_ERROR_LENGTH = 2000
 
-__all__ = ["Job", "Worker", "claim", "complete", "enqueue", "fail"]
+__all__ = ["Handler", "Job", "Worker", "claim", "complete", "enqueue", "fail"]
 
 
 async def enqueue(

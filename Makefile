@@ -5,7 +5,7 @@ WEB := apps/panel-web
 UNIT_MARKERS := not integration and not ui
 ARGS ?=
 
-.PHONY: help install lint format typecheck test test-unit test-integration ci web-install web-lint web-typecheck web-test web-build web-ci ci-all dev down migrate
+.PHONY: help install lint format typecheck test test-unit test-integration ci web-install web-lint web-typecheck web-test web-build web-ci ci-all dev down migrate create-admin
 
 help: ## list targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n", $$1, $$2}'
@@ -62,11 +62,14 @@ web-ci: web-install web-lint web-typecheck web-test web-build ## web gate
 
 ci-all: ci web-ci ## python and web gates
 
-dev: ## placeholder: later tasks add the compose dev stack
-	@echo "dev: the dev stack is added by a later task"
+dev: ## compose stack: postgres, redis, migrate, api, worker, caddy (needs Docker)
+	docker compose -f infra/docker-compose.yml up --build
 
-down: ## placeholder: later tasks add stack teardown
-	@echo "down: stack teardown is added by a later task"
+down: ## stop the compose stack (volumes kept; add `ARGS=-v` to drop data)
+	docker compose -f infra/docker-compose.yml down $(ARGS)
+
+create-admin: ## bootstrap an admin in the running stack: make create-admin USERNAME=ali MOBILE=09121234567
+	docker compose -f infra/docker-compose.yml run --rm --no-deps api python -m payamakyar.api create-admin --username "$(USERNAME)" --mobile "$(MOBILE)"
 
 migrate: ## alembic upgrade head (PAYAMAKYAR_DATABASE_URL)
 	$(UV) run python -m payamakyar.db upgrade head
