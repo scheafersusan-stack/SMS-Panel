@@ -78,3 +78,15 @@ async def test_mfa_changed_template(db_session: AsyncSession) -> None:
     assert msg.body == DEFAULTS["system_sms.mfa_changed"]
     assert "دومرحله‌ای" in msg.body
     await db_session.rollback()
+
+
+async def test_security_changed_template(db_session: AsyncSession) -> None:
+    await OutboxNotifier().send_sms(db_session, "09121234567", "security_changed", {})
+    msg = (
+        await db_session.execute(
+            select(SystemMessage).where(SystemMessage.template_key == "security_changed")
+        )
+    ).scalar_one()
+    assert msg.body == DEFAULTS["system_sms.security_changed"]
+    assert "تنظیمات امنیتی" in msg.body
+    await db_session.rollback()

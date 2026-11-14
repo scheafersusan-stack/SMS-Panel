@@ -281,6 +281,7 @@ function RestrictionsForm({ initial, toast }: { initial: Security; toast: Toaste
   const [ips, setIps] = useState(initial.allowed_ips);
   const [ipInput, setIpInput] = useState("");
   const [windows, setWindows] = useState<HoursWindow[]>(initial.login_hours.map((w) => ({ ...w })));
+  const [password, setPassword] = useState("");
   const [errors, setErrors] = useState<Record<string, ReactNode>>({});
   const [formError, setFormError] = useState<{ title: string; detail: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -301,12 +302,14 @@ function RestrictionsForm({ initial, toast }: { initial: Security; toast: Toaste
   async function save() {
     setErrors({});
     setFormError(null);
-    const body: Security = {
+    const body: Security & { password: string } = {
+      password,
       login_notice: notice,
       allowed_ips: ips,
       login_hours: windows.map((w) => ({ days: [...w.days].sort(), from: latinDigits(w.from.trim()), to: latinDigits(w.to.trim()) })),
     };
     const missing: Record<string, ReactNode> = {};
+    if (!password) missing.password = "رمز عبور حساب را وارد کنید.";
     body.login_hours.forEach((w, i) => {
       if (w.days.length === 0) missing[`login_hours/${i}/days`] = "دست‌کم یک روز را انتخاب کنید.";
     });
@@ -317,11 +320,14 @@ function RestrictionsForm({ initial, toast }: { initial: Security; toast: Toaste
     setBusy(true);
     try {
       const saved = await api<Security>("PUT", `${V1}/account/security`, body);
-      qc.setQueryData(["account", "security"], saved);
+      setPassword("");
+      qc.setQueryData<Security>(["account", "security"], { login_notice: saved.login_notice, allowed_ips: saved.allowed_ips, login_hours: saved.login_hours });
       toast("محدودیت‌های ورود ذخیره شد.");
     } catch (err) {
       const path = fieldPath(err);
-      if (err instanceof ApiError && err.code === "WOULD_LOCK_YOU_OUT") {
+      if (path === "password") {
+        setErrors({ password: err instanceof ApiError && err.code === "CURRENT_PASSWORD_INVALID" ? "رمز عبور درست نیست." : errorText(err) });
+      } else if (err instanceof ApiError && err.code === "WOULD_LOCK_YOU_OUT") {
         setFormError({ title: "این تنظیم دسترسی خود شما را می‌بندد", detail: err.detail });
       } else if (path && /^(allowed_ips|login_hours)\//.test(path)) {
         setErrors({ [path]: errorText(err) });
@@ -414,6 +420,16 @@ function RestrictionsForm({ initial, toast }: { initial: Security; toast: Toaste
         ))}
       </div>
 
+      <TextField
+        label="رمز عبور حساب برای ذخیره"
+        type="password"
+        ltr
+        autoComplete="current-password"
+        help="برای ذخیرهٔ این تنظیمات، رمز عبور حساب را دوباره وارد کنید."
+        value={password}
+        error={errors.password}
+        onChange={(e) => setPassword(e.target.value)}
+      />
       <div>
         <Button type="submit" variant="primary" loading={busy}>
           ذخیرهٔ محدودیت‌ها

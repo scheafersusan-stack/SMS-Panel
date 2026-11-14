@@ -134,9 +134,11 @@ describe("ProfileSecurity", () => {
     await user.type(screen.getByLabelText("ساعت شروع بازهٔ ۱"), "۰۸:۰۰");
     await user.clear(screen.getByLabelText("ساعت پایان بازهٔ ۱"));
     await user.type(screen.getByLabelText("ساعت پایان بازهٔ ۱"), "18:30");
+    await user.type(screen.getByLabelText("رمز عبور حساب برای ذخیره"), "Mypass1!");
     await user.click(screen.getByRole("button", { name: "ذخیرهٔ محدودیت‌ها" }));
     expect(await screen.findByText("محدودیت‌های ورود ذخیره شد.")).toBeInTheDocument();
-    expect(body).toEqual({ login_notice: true, allowed_ips: ["192.168.1.0/24"], login_hours: [{ days: [0, 6], from: "08:00", to: "18:30" }] });
+    expect(body).toEqual({ password: "Mypass1!", login_notice: true, allowed_ips: ["192.168.1.0/24"], login_hours: [{ days: [0, 6], from: "08:00", to: "18:30" }] });
+    expect(screen.getByLabelText("رمز عبور حساب برای ذخیره")).toHaveValue("");
   });
 
   it("shows the normalised CIDR the server saved", async () => {
@@ -146,6 +148,7 @@ describe("ProfileSecurity", () => {
     renderWithClient(<ProfileSecurity />);
     await user.type(await screen.findByLabelText("نشانی IP یا محدوده (CIDR)"), "192.168.1.5/24");
     await user.click(screen.getByRole("button", { name: "افزودن نشانی" }));
+    await user.type(screen.getByLabelText("رمز عبور حساب برای ذخیره"), "Mypass1!");
     await user.click(screen.getByRole("button", { name: "ذخیرهٔ محدودیت‌ها" }));
     expect(await screen.findByText("192.168.1.0/24")).toBeInTheDocument();
     expect(screen.queryByText("192.168.1.5/24")).toBeNull();
@@ -158,10 +161,33 @@ describe("ProfileSecurity", () => {
     renderWithClient(<ProfileSecurity />);
     await user.type(await screen.findByLabelText("نشانی IP یا محدوده (CIDR)"), "203.0.113.5");
     await user.click(screen.getByRole("button", { name: "افزودن نشانی" }));
+    await user.type(screen.getByLabelText("رمز عبور حساب برای ذخیره"), "Mypass1!");
     await user.click(screen.getByRole("button", { name: "ذخیرهٔ محدودیت‌ها" }));
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("این تنظیم دسترسی خود شما را می‌بندد");
     expect(alert).toHaveTextContent("نشانی فعلی شما در فهرست مجاز نیست.");
+  });
+
+  it("asks for the account password before saving restrictions", async () => {
+    base();
+    let calls = 0;
+    server.use(
+      http.put(`${V1}/account/security`, () => {
+        calls += 1;
+        return apiError(400, "CURRENT_PASSWORD_INVALID", "x", "/password");
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithClient(<ProfileSecurity />);
+    await user.click(await screen.findByLabelText("اطلاع‌رسانی پیامکی هر ورود"));
+    await user.click(screen.getByRole("button", { name: "ذخیرهٔ محدودیت‌ها" }));
+    expect(await screen.findByText("رمز عبور حساب را وارد کنید.")).toBeInTheDocument();
+    expect(calls).toBe(0);
+    await user.type(screen.getByLabelText("رمز عبور حساب برای ذخیره"), "bad");
+    await user.click(screen.getByRole("button", { name: "ذخیرهٔ محدودیت‌ها" }));
+    expect(await screen.findByText("رمز عبور درست نیست.")).toBeInTheDocument();
+    expect(screen.getByLabelText("رمز عبور حساب برای ذخیره")).toHaveAttribute("aria-invalid", "true");
+    expect(calls).toBe(1);
   });
 
   it("lists sessions and removes a revoked one", async () => {

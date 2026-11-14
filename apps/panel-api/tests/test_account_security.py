@@ -345,6 +345,7 @@ async def test_security_update_and_read(
 ) -> None:
     user, c = signed
     body = {
+        "password": PASSWORD,
         "login_notice": True,
         "allowed_ips": ["127.0.0.0/8", "10.1.2.3", "2001:db8::/32"],
         "login_hours": [{"days": [0, 1], "from": "08:00", "to": "24:00"}],
@@ -364,10 +365,12 @@ async def test_security_update_and_read(
     assert got.status_code == 200
     assert got.json() == r.json()
     assert "user.security_update" in await _actions(app, user.id)
+    assert (await _templates(app, user.mobile))[-1] == "security_changed"
+    assert PASSWORD not in await _audit_payloads(app, user.id)
     # Empty lists clear the restriction.
     r = await c.put(
         SECURITY,
-        json={"login_notice": False, "allowed_ips": [], "login_hours": []},
+        json={"password": PASSWORD, "login_notice": False, "allowed_ips": [], "login_hours": []},
         headers=_csrf(c),
     )
     assert r.status_code == 200
@@ -383,6 +386,7 @@ async def test_security_rejects_bad_cidr_with_pointer(
     r = await c.put(
         SECURITY,
         json={
+            "password": PASSWORD,
             "login_notice": False,
             "allowed_ips": ["127.0.0.1", "10.0.0.0/33"],
             "login_hours": [],
@@ -410,7 +414,12 @@ async def test_security_rejects_bad_window(
     _, c = signed
     r = await c.put(
         SECURITY,
-        json={"login_notice": False, "allowed_ips": [], "login_hours": [window]},
+        json={
+            "password": PASSWORD,
+            "login_notice": False,
+            "allowed_ips": [],
+            "login_hours": [window],
+        },
         headers=_csrf(c),
     )
     assert r.status_code == 422, r.text
@@ -424,7 +433,12 @@ async def test_security_refuses_to_lock_you_out(
     user, c = signed
     r = await c.put(
         SECURITY,
-        json={"login_notice": False, "allowed_ips": ["10.9.0.0/16"], "login_hours": []},
+        json={
+            "password": PASSWORD,
+            "login_notice": False,
+            "allowed_ips": ["10.9.0.0/16"],
+            "login_hours": [],
+        },
         headers=_csrf(c),
     )
     assert r.status_code == 422
@@ -434,6 +448,7 @@ async def test_security_refuses_to_lock_you_out(
     r = await c.put(
         SECURITY,
         json={
+            "password": PASSWORD,
             "login_notice": False,
             "allowed_ips": [],
             "login_hours": [{"days": [1], "from": "00:00", "to": "24:00"}],
@@ -455,6 +470,43 @@ async def test_security_refuses_to_lock_you_out(
     assert n == 1
 
 
+async def test_security_requires_the_password(
+    app: FastAPI, clock: Clock, signed: tuple[User, httpx.AsyncClient]
+) -> None:
+    user, c = signed
+    body: dict[str, Any] = {"login_notice": True, "allowed_ips": [], "login_hours": []}
+    r = await c.put(SECURITY, json=body, headers=_csrf(c))
+    assert r.status_code == 422
+    assert r.json()["error"]["source"] == {"pointer": "/password"}
+    r = await c.put(SECURITY, json={**body, "password": "wrong"}, headers=_csrf(c))
+    assert r.status_code == 400
+    assert _err(r) == "CURRENT_PASSWORD_INVALID"
+    assert r.json()["error"]["source"] == {"pointer": "/password"}
+    fresh = await _get_user(app, user.id)
+    assert fresh.failed_logins == 1  # counts toward the lockout
+    assert fresh.login_notice is False
+    assert "security_changed" not in await _templates(app, user.mobile)
+    async with app.state.session_factory() as s:
+        row = await s.get(User, user.id)
+        assert row is not None
+        row.locked_until = clock.now + timedelta(minutes=10)
+        await s.commit()
+    r = await c.put(SECURITY, json={**body, "password": PASSWORD}, headers=_csrf(c))
+    assert r.status_code == 423
+    assert _err(r) == "ACCOUNT_LOCKED"
+    assert (await _get_user(app, user.id)).login_notice is False
+
+
+async def test_security_no_change_sends_no_notice(
+    app: FastAPI, clock: Clock, signed: tuple[User, httpx.AsyncClient]
+) -> None:
+    user, c = signed
+    body = {"password": PASSWORD, "login_notice": False, "allowed_ips": [], "login_hours": []}
+    r = await c.put(SECURITY, json=body, headers=_csrf(c))
+    assert r.status_code == 200
+    assert "security_changed" not in await _templates(app, user.mobile)
+
+
 async def test_security_requires_auth(client: httpx.AsyncClient, clock: Clock) -> None:
     r = await client.get(SECURITY)
     assert r.status_code == 401
@@ -466,13 +518,23 @@ async def test_ipv4_mapped_ipv6_matches_ipv4_cidr(app: FastAPI, clock: Clock) ->
     async with _signed_in(app, user, host=mapped) as c:
         r = await c.put(
             SECURITY,
-            json={"login_notice": False, "allowed_ips": ["10.0.0.0/8"], "login_hours": []},
+            json={
+                "password": PASSWORD,
+                "login_notice": False,
+                "allowed_ips": ["10.0.0.0/8"],
+                "login_hours": [],
+            },
             headers=_csrf(c),
         )
         assert r.status_code == 200, r.text
         r = await c.put(
             SECURITY,
-            json={"login_notice": False, "allowed_ips": ["192.168.0.0/16"], "login_hours": []},
+            json={
+                "password": PASSWORD,
+                "login_notice": False,
+                "allowed_ips": ["192.168.0.0/16"],
+                "login_hours": [],
+            },
             headers=_csrf(c),
         )
         assert r.status_code == 422

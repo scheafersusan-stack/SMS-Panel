@@ -467,6 +467,8 @@ class LoginWindow(BaseModel):
 
 
 class SecurityBody(BaseModel):
+    password: Secret
+    """The account password again (re-authentication, as for the second-factor changes)."""
     login_notice: bool
     allowed_ips: list[Annotated[str, StringConstraints(max_length=64)]] = Field(
         max_length=MAX_ALLOWED_IPS
@@ -550,25 +552,30 @@ async def put_security(
     request: Request,
     s: SessionDep,
     clock: Clock,
+    notifier: Notifier,
 ) -> SecurityOut:
-    """Empty lists lift a restriction. Refuses (422 ``WOULD_LOCK_YOU_OUT``) a non-empty
-    ``allowed_ips`` that excludes the caller's address, and a non-empty ``login_hours`` that
-    excludes the current Tehran time."""
+    """Needs the account password (``_reauthenticate``: a wrong one counts toward the lockout,
+    423 while locked). Empty lists lift a restriction. Refuses (422 ``WOULD_LOCK_YOU_OUT``) a
+    non-empty ``allowed_ips`` that excludes the caller's address, and a non-empty
+    ``login_hours`` that excludes the current Tehran time. A real change is audited and the
+    owner is told by SMS (``security_changed``)."""
     now = clock()
     ips = _normalize_ips(body.allowed_ips)
     windows = _normalize_windows(body.login_hours)
+    user = await _locked_user(s, current)
+    await _reauthenticate(s, user, body.password, request=request, now=now, pointer="/password")
     ip = client_ip(request)
     if ips and not login.ip_allowed(ips, ip):
         raise _would_lock_out("/allowed_ips", "نشانی فعلی شما در فهرست مجاز نیست.")
     if windows and not login.within_hours(windows, now):
         raise _would_lock_out("/login_hours", "ساعت فعلی در بازه‌های مجاز نیست.")
-    user = await _locked_user(s, current)
     before = _snapshot(user)
     user.login_notice = body.login_notice
     user.allowed_ips = ips or None
     user.login_hours = windows or None
     await s.flush()
-    await _audit_user(
-        s, user, request, "user.security_update", before=before, after=_snapshot(user)
-    )
+    after = _snapshot(user)
+    await _audit_user(s, user, request, "user.security_update", before=before, after=after)
+    if after != before:
+        await notifier.send_sms(s, user.mobile, "security_changed", {})
     return _security_of(user)
