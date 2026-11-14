@@ -3,8 +3,9 @@
 import ipaddress
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
+from typing import Annotated
 
-from fastapi import Request
+from fastapi import Depends, Request
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +27,10 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
         except BaseException:
             await session.rollback()
             raise
+
+
+SessionDep = Annotated[AsyncSession, Depends(get_session, scope="function")]
+"""Function-scoped: the commit runs before the response is sent, so a failure is a 500."""
 
 
 def get_redis(request: Request) -> Redis:
@@ -62,11 +67,14 @@ def client_ip(request: Request) -> str:
     if peer_ip is None or not any(peer_ip in n for n in nets):
         return peer
     hops = [h for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
-    addrs = [_as_ip(h) for h in hops]
-    if not hops or any(a is None for a in addrs):
-        return peer
-    chain = [a for a in addrs if a is not None]
-    for addr in reversed(chain):
+    # Right to left: skip trusted proxies; the first other hop is the client. An invalid hop
+    # ends the walk (it cannot be trusted or attributed), falling back to the last good one.
+    result = peer
+    for hop in reversed(hops):
+        addr = _as_ip(hop)
+        if addr is None:
+            return result
+        result = str(addr)
         if not any(addr in n for n in nets):
-            return str(addr)
-    return str(chain[0])
+            return result
+    return result

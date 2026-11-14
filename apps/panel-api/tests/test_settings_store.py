@@ -39,6 +39,21 @@ async def test_unknown_key(db_session: AsyncSession) -> None:
     assert await store.get("nope.nope", "d") == "d"
 
 
+async def test_type_mismatch(db_session: AsyncSession) -> None:
+    store = SettingsStore(db_session)
+    for bad in ("7", True, 1.5, None):
+        with pytest.raises(ValueError):
+            await store.set("auth.max_failed_tries", bad, None, None)
+
+
+async def test_template_errors(db_session: AsyncSession) -> None:
+    n = OutboxNotifier()
+    with pytest.raises(ValueError):
+        await n.send_sms(db_session, "09121234567", "otp", {})
+    await n.send_sms(db_session, "09121234567", "otp", {"code": "${code.__class__}"})
+    await db_session.rollback()
+
+
 async def test_outbox_notifier(db_session: AsyncSession) -> None:
     await OutboxNotifier().send_sms(db_session, "09121234567", "otp", {"code": "123456"})
     msg = (

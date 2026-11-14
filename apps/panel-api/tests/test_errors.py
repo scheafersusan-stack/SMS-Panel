@@ -83,7 +83,15 @@ async def test_unhandled_is_500_without_stack(
     assert r.status_code == 500
     assert r.json()["error"]["code"] == "INTERNAL"
     assert "Traceback" not in r.text and "RuntimeError" not in r.text
-    assert r.headers["X-Request-Id"]
+    rid = r.headers["X-Request-Id"]
+    records = [x for x in caplog.records if x.getMessage() == "unhandled exception"]
+    assert len(records) == 1
+    assert getattr(records[0], "request_id", None) == rid
+    from payamakyar.core.logging import JsonFormatter, RedactFilter
+
+    flt = RedactFilter()
+    flt.filter(records[0])
+    assert "09123456789" not in JsonFormatter().format(records[0])
 
 
 async def test_csrf_missing_is_403(app: FastAPI, client: httpx.AsyncClient) -> None:

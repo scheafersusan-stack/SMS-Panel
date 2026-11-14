@@ -1,6 +1,5 @@
 """Error envelope: ``{"error": {"code", "title", "detail", "source"}}`` with a real status."""
 
-import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -10,8 +9,6 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from payamakyar.core.masking import redact
-
-log = logging.getLogger("payamakyar.api")
 
 _HTTP_CODES: dict[int, tuple[str, str]] = {
     400: ("BAD_REQUEST", "درخواست نامعتبر است"),
@@ -98,12 +95,8 @@ async def _validation_error(_: Request, exc: Exception) -> JSONResponse:
     )
 
 
-async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
-    log.error(
-        "unhandled exception",
-        exc_info=(type(exc), exc, exc.__traceback__),
-        extra={"request_id": getattr(request.state, "request_id", None), "path": request.url.path},
-    )
+async def _unhandled(_: Request, __: Exception) -> JSONResponse:
+    # Logging happens once, in the request-id middleware, which sees the exception first.
     return internal_error_response()
 
 

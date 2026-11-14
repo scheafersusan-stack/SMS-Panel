@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI, Request, Response
 from redis.asyncio import Redis
+from starlette._utils import get_route_path
 
 from payamakyar.api import csrf
 from payamakyar.api.deps import parse_trusted_proxies
@@ -49,7 +50,7 @@ def create_app(settings: PanelSettings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def csrf_guard(request: Request, call_next: Handler) -> Response:
-        if csrf.is_protected(request.method, request.url.path) and not csrf.csrf_ok(
+        if csrf.is_protected(request.method, get_route_path(request.scope)) and not csrf.csrf_ok(
             request, cfg.csrf_cookie_name
         ):
             return error_response(

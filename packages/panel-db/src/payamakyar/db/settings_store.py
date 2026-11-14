@@ -23,8 +23,8 @@ DEFAULTS: dict[str, Any] = {
     "otp.ttl_seconds": 120,
     "otp.max_attempts": 5,
     "otp.resend_seconds": 60,
-    "system_sms.otp": "کد تأیید پیامک‌یار: {code}\nاین کد را به کسی ندهید.",
-    "system_sms.login_notice": "ورود به حساب پیامک‌یار شما در {time} از نشانی {ip} انجام شد.",
+    "system_sms.otp": "کد تأیید پیامک‌یار: $code\nاین کد را به کسی ندهید.",
+    "system_sms.login_notice": "ورود به حساب پیامک‌یار شما در $time از نشانی $ip انجام شد.",
     "system_sms.password_changed": "رمز عبور حساب پیامک‌یار شما تغییر کرد.",
 }
 
@@ -58,6 +58,9 @@ class SettingsStore:
     ) -> None:
         if key not in DEFAULTS:
             raise ValueError(f"unknown setting: {key}")
+        expected = type(DEFAULTS[key])
+        if type(value) is not expected:
+            raise ValueError(f"setting {key} must be {expected.__name__}")
         before = await self.get(key)
         await self._s.execute(
             insert(Setting)

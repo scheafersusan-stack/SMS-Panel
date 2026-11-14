@@ -1,3 +1,4 @@
+import ipaddress
 import uuid
 from datetime import UTC, datetime
 
@@ -59,8 +60,20 @@ async def test_client_ip_trusts_only_proxies(app: FastAPI, client: httpx.AsyncCl
     # Test peer is 127.0.0.1 (not trusted): header ignored.
     r = await client.get("/panel/web/v1/_t/ip", headers={"X-Forwarded-For": "1.2.3.4"})
     assert r.json()["ip"] == "127.0.0.1"
-    app.state.trusted_networks = [__import__("ipaddress").ip_network("127.0.0.0/8")]
+    app.state.trusted_networks = [ipaddress.ip_network("127.0.0.0/8")]
     r = await client.get("/panel/web/v1/_t/ip", headers={"X-Forwarded-For": "9.9.9.9, 1.2.3.4"})
     assert r.json()["ip"] == "1.2.3.4"
     r = await client.get("/panel/web/v1/_t/ip", headers={"X-Forwarded-For": "garbage"})
     assert r.json()["ip"] == "127.0.0.1"
+
+
+async def test_client_ip_invalid_hop_stops_walk(app: FastAPI, client: httpx.AsyncClient) -> None:
+    @app.get("/panel/web/v1/_t/ip2")
+    async def ip2(request: Request) -> dict[str, str]:
+        return {"ip": client_ip(request)}
+
+    app.state.trusted_networks = [ipaddress.ip_network("127.0.0.0/8")]
+    h = {"X-Forwarded-For": "bogus, 1.2.3.4, 127.0.0.2"}
+    assert (await client.get("/panel/web/v1/_t/ip2", headers=h)).json()["ip"] == "1.2.3.4"
+    h = {"X-Forwarded-For": "1.2.3.4, bogus, 127.0.0.2"}
+    assert (await client.get("/panel/web/v1/_t/ip2", headers=h)).json()["ip"] == "127.0.0.2"

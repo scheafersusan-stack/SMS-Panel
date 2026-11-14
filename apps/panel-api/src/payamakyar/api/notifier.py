@@ -1,5 +1,6 @@
 """System SMS (OTP, login notices) written to an outbox; phase 2 delivers them."""
 
+from string import Template
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,7 +28,10 @@ class OutboxNotifier:
             template = await SettingsStore(s).get(f"system_sms.{template_key}")
         except KeyError as exc:
             raise ValueError(f"unknown system sms template: {template_key}") from exc
-        body = str(template).format_map(params)
+        try:
+            body = Template(str(template)).substitute(params)
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"cannot render system sms template: {template_key}") from exc
         message = SystemMessage(to_mobile=to_mobile, template_key=template_key, body=body)
         s.add(message)
         await s.flush()

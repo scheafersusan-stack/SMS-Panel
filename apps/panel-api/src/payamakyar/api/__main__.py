@@ -15,6 +15,7 @@ def main() -> None:
         host=os.environ.get("PAYAMAKYAR_API_HOST", "127.0.0.1"),
         port=int(os.environ.get("PAYAMAKYAR_API_PORT", "8000")),
         log_config=None,
+        proxy_headers=False,  # trust is decided by PAYAMAKYAR_TRUSTED_PROXIES only
     )
 
 
