@@ -19,6 +19,7 @@ from pathlib import Path
 
 import asyncpg
 import pytest
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from payamakyar.db import migrate
@@ -61,10 +62,29 @@ def _os_user() -> str | None:
     pytest.skip("running as root and no unprivileged user (postgres/nobody) exists")
 
 
-def _run_as(user: str | None, argv: list[str]) -> subprocess.CompletedProcess[str]:
+def with_database(url: str, name: str) -> str:
+    """Return ``url`` pointing at database ``name``."""
+    return make_url(url).set(database=name).render_as_string(hide_password=False)
+
+
+def _run_as(
+    user: str | None, argv: list[str], log: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     if user:
         argv = ["runuser", "-u", user, "--", *argv]
-    return subprocess.run(argv, capture_output=True, text=True, check=True)  # noqa: S603
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False)  # noqa: S603
+    if proc.returncode != 0:
+        tail = ""
+        if log is not None and log.exists():
+            tail = "\n--- server log tail ---\n" + "\n".join(
+                log.read_text(errors="replace").splitlines()[-30:]
+            )
+        pytest.fail(
+            f"{' '.join(argv)} exited {proc.returncode}\nstdout: {proc.stdout}\n"
+            f"stderr: {proc.stderr}{tail}",
+            pytrace=False,
+        )
+    return proc
 
 
 async def _admin(url: str, sql: str) -> None:
@@ -89,29 +109,44 @@ def pg_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
         shutil.chown(root, user=user)
     data = root / "data"
     port = _free_port()
-    started = False
+    log = root / "log"
     try:
         _run_as(user, [str(bindir / "initdb"), "-D", str(data), "-U", "postgres", "-A", "trust"])
         opts = f"-p {port} -k {root} -c listen_addresses=127.0.0.1 -c fsync=off"
-        _run_as(
-            user,
-            [
-                str(bindir / "pg_ctl"),
-                "-D",
-                str(data),
-                "-o",
-                opts,
-                "-l",
-                str(root / "log"),
-                "-w",
-                "start",
-            ],
-        )
-        started = True
-        yield f"postgresql://postgres@127.0.0.1:{port}/postgres"
+        try:
+            _run_as(
+                user,
+                [
+                    str(bindir / "pg_ctl"),
+                    "-D",
+                    str(data),
+                    "-o",
+                    opts,
+                    "-l",
+                    str(log),
+                    "-w",
+                    "start",
+                ],
+                log,
+            )
+            yield f"postgresql://postgres@127.0.0.1:{port}/postgres"
+        finally:
+            if (data / "PG_VERSION").exists():
+                # Always attempt a stop (a failed start may still have spawned the postmaster).
+                subprocess.run(  # noqa: S603
+                    [
+                        *(["runuser", "-u", user, "--"] if user else []),
+                        str(bindir / "pg_ctl"),
+                        "-D",
+                        str(data),
+                        "-m",
+                        "immediate",
+                        "stop",
+                    ],
+                    capture_output=True,
+                    check=False,
+                )
     finally:
-        if started:
-            _run_as(user, [str(bindir / "pg_ctl"), "-D", str(data), "-m", "immediate", "stop"])
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -119,9 +154,8 @@ def pg_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
 def db_url(pg_url: str) -> Iterator[str]:
     """A fresh database (migrated to head) per test module; dropped afterwards."""
     name = f"pk_test_{uuid.uuid4().hex[:12]}"
-    base, _, _ = pg_url.rpartition("/")
     asyncio.run(_admin(pg_url, f'CREATE DATABASE "{name}"'))
-    url = f"{base}/{name}"
+    url = with_database(pg_url, name)
     try:
         migrate.upgrade(url)
         yield url
@@ -157,11 +191,13 @@ def redis_url() -> Iterator[str]:
         )
         try:
             deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
+            while True:
                 try:
                     socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
                     break
                 except OSError:
+                    if time.monotonic() > deadline or proc.poll() is not None:
+                        pytest.fail("redis-server did not become reachable within 10s")
                     time.sleep(0.05)
             yield f"redis://127.0.0.1:{port}/0"
         finally:
@@ -169,4 +205,4 @@ def redis_url() -> Iterator[str]:
             proc.wait(timeout=10)
 
 
-__all__ = ["async_url", "db_session", "db_url", "pg_url", "redis_url"]
+__all__ = ["async_url", "db_session", "db_url", "pg_url", "redis_url", "with_database"]

@@ -1,5 +1,5 @@
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,7 +51,7 @@ async def test_user_json_and_network_columns(db_session: AsyncSession) -> None:
     await db_session.commit()
     await db_session.refresh(u)
     assert u.login_hours[0]["to"] == "18:00"
-    assert len(u.allowed_ips) == 2
+    assert [str(n) for n in u.allowed_ips] == ["10.0.0.0/8", "192.168.1.5/32"]
 
 
 async def test_job_dedupe_and_audit_bigserial(db_session: AsyncSession) -> None:
@@ -69,4 +69,4 @@ async def test_job_dedupe_and_audit_bigserial(db_session: AsyncSession) -> None:
     db_session.add(r)
     await db_session.commit()
     assert r.is_staff is False
-    assert (await db_session.execute(text("select 1"))).scalar_one() == 1
+    assert r.id is not None and r.price is None

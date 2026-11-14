@@ -1,13 +1,16 @@
 import asyncio
+import re
+import uuid
 
 import asyncpg
 import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from sqlalchemy import Connection
+from sqlalchemy import CheckConstraint, Connection, inspect
 
 from payamakyar.db import migrate
 from payamakyar.db.base import Base
+from payamakyar.db.testing import with_database
 
 pytestmark = pytest.mark.integration
 
@@ -42,7 +45,7 @@ async def _make_db(pg_url: str, name: str) -> str:
         await conn.execute(f'CREATE DATABASE "{name}"')
     finally:
         await conn.close()
-    return pg_url.rpartition("/")[0] + "/" + name
+    return with_database(pg_url, name)
 
 
 async def _drop_db(pg_url: str, name: str) -> None:
@@ -54,7 +57,7 @@ async def _drop_db(pg_url: str, name: str) -> None:
 
 
 async def test_upgrade_and_downgrade_clean(pg_url: str) -> None:
-    name = "pk_test_migr_roundtrip"
+    name = f"pk_test_migr_{uuid.uuid4().hex[:12]}"
     url = await _make_db(pg_url, name)
     try:
         await asyncio.to_thread(migrate.upgrade, url, "head")
@@ -78,7 +81,9 @@ async def _diff(url: str) -> list[object]:
         async with engine.connect() as conn:
 
             def run(sync_conn: Connection) -> list[object]:
-                ctx = MigrationContext.configure(sync_conn, opts={"compare_type": True})
+                ctx = MigrationContext.configure(
+                    sync_conn, opts={"compare_type": True, "compare_server_default": True}
+                )
                 return list(compare_metadata(ctx, Base.metadata))
 
             import payamakyar.db.models  # noqa: F401
@@ -86,3 +91,40 @@ async def _diff(url: str) -> list[object]:
             return await conn.run_sync(run)
     finally:
         await engine.dispose()
+
+
+def _literals(sql: str) -> set[str]:
+    return set(re.findall(r"'([^']*)'", sql))
+
+
+async def _checks(url: str) -> dict[str, dict[str, set[str]]]:
+    from payamakyar.db.engine import create_engine
+
+    engine = create_engine(url)
+    try:
+        async with engine.connect() as conn:
+
+            def run(sync_conn: Connection) -> dict[str, dict[str, set[str]]]:
+                insp = inspect(sync_conn)
+                return {
+                    t: {c["name"]: _literals(c["sqltext"]) for c in insp.get_check_constraints(t)}  # type: ignore[misc]
+                    for t in TABLES
+                }
+
+            return await conn.run_sync(run)
+    finally:
+        await engine.dispose()
+
+
+def test_check_constraints_match_migration(db_url: str) -> None:
+    import payamakyar.db.models  # noqa: F401
+
+    actual = asyncio.run(_checks(db_url))
+    expected: dict[str, dict[str, set[str]]] = {t: {} for t in TABLES}
+    for table in Base.metadata.tables.values():
+        for con in table.constraints:
+            if isinstance(con, CheckConstraint):
+                assert con.name is not None
+                expected[table.name][str(con.name)] = _literals(str(con.sqltext))
+    assert actual == expected
+    assert sum(len(v) for v in expected.values()) >= 7
