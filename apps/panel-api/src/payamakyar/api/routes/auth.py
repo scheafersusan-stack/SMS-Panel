@@ -18,6 +18,7 @@ from payamakyar.api import otp, sessions
 from payamakyar.api.deps import SessionDep, client_ip, get_clock, get_redis, get_settings_dep
 from payamakyar.api.errors import ApiError
 from payamakyar.api.notifier import OutboxNotifier, SystemNotifier
+from payamakyar.api.ratelimit import RateLimiter
 from payamakyar.core.passwords import hash_password, password_problems
 from payamakyar.core.phone import InvalidMobile, normalize_mobile
 from payamakyar.core.settings import PanelSettings
@@ -104,6 +105,16 @@ async def register_start(
         raise _invalid("شمارهٔ موبایل معتبر نیست.", "/mobile") from None
     now = clock()
     ip = client_ip(request)
+    limit = int(await SettingsStore(s).get("otp.start_rate_per_ip_per_hour"))
+    limited = await RateLimiter(redis, lambda: now.timestamp()).hit(f"otp.start:{ip}", limit, 3600)
+    if not limited.allowed:
+        raise ApiError(
+            429,
+            "RATE_LIMITED",
+            "تعداد درخواست‌ها زیاد است",
+            "کمی بعد دوباره تلاش کنید.",
+            headers={"Retry-After": str(limited.retry_after)},
+        )
     # Serialise concurrent starts for one number so the resend window cannot be raced.
     await s.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": f"otp:{mobile}"})
     taken = (await s.execute(select(User.id).where(User.mobile == mobile))).first()
@@ -211,13 +222,23 @@ async def register_complete(
     except IntegrityError as exc:
         cause = getattr(exc.orig, "__cause__", None)
         constraint = str(getattr(cause, "constraint_name", "") or "")
-        if constraint.endswith("mobile_key"):
+        if constraint == "uq_users_mobile":
             raise ApiError(
-                409, "MOBILE_TAKEN", "این شماره قبلاً ثبت شده است", "", "/mobile"
+                409,
+                "MOBILE_TAKEN",
+                "این شماره قبلاً ثبت شده است",
+                "با این شماره وارد شوید.",
+                "/mobile",
             ) from None
-        raise ApiError(
-            409, "USERNAME_TAKEN", "این نام کاربری قبلاً گرفته شده است", "", "/username"
-        ) from None
+        if constraint == "uq_users_username":
+            raise ApiError(
+                409,
+                "USERNAME_TAKEN",
+                "این نام کاربری قبلاً گرفته شده است",
+                "نام کاربری دیگری انتخاب کنید.",
+                "/username",
+            ) from None
+        raise
     s.add(UserRole(user_id=user.id, role_id=await _customer_role_id(s)))
     await audit.record(
         s,

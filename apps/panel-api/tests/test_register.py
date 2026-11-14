@@ -20,6 +20,7 @@ from payamakyar.db.models import (
     User,
     UserRole,
 )
+from payamakyar.db.settings_store import SettingsStore
 
 pytestmark = pytest.mark.integration
 
@@ -36,6 +37,12 @@ class Clock:
 
     def __call__(self) -> datetime:
         return self.now
+
+
+@pytest.fixture(autouse=True)
+async def _reset_redis(app: FastAPI) -> None:
+    # Frozen clocks reuse the same rate-limit window across tests.
+    await app.state.redis.flushdb()
 
 
 @pytest.fixture
@@ -156,8 +163,6 @@ async def test_kind_specific_required(
     cid = (await _start(client, local, kind)).json()["challenge_id"]
     code = await _code_for(app, canon)
     over: dict[str, Any] = {"last_name": None}  # no company_name either
-    if kind == "individual":
-        over = {"last_name": None}
     r = await client.post(COMPLETE, json=_body(cid, code, username, **over))
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "VALIDATION_FAILED"
@@ -330,3 +335,37 @@ async def test_username_containing_word_mobile_maps_to_username_taken(
     code2 = await _code_for(app, canon2)
     r = await client.post(COMPLETE, json=_body(cid2, code2, "my_mobile_1"))
     assert (r.status_code, r.json()["error"]["code"]) == (409, "USERNAME_TAKEN")
+
+
+async def test_mobile_taken_between_start_and_complete(
+    app: FastAPI, client: httpx.AsyncClient, clock: Clock
+) -> None:
+    local, canon, username = _fresh()
+    cid = (await _start(client, local)).json()["challenge_id"]
+    code = await _code_for(app, canon)
+    async with app.state.session_factory() as s:
+        s.add(User(username=username + "_other", mobile=canon, password_hash="x"))
+        await s.commit()
+    r = await client.post(COMPLETE, json=_body(cid, code, username))
+    assert r.status_code == 409
+    err = r.json()["error"]
+    assert err["code"] == "MOBILE_TAKEN"
+    assert err["detail"]
+    assert err["source"] == {"pointer": "/mobile"}
+
+
+async def test_start_per_ip_throttle(app: FastAPI, client: httpx.AsyncClient, clock: Clock) -> None:
+    async with app.state.session_factory() as s:
+        await SettingsStore(s).set("otp.start_rate_per_ip_per_hour", 3, None)
+        await s.commit()
+    try:
+        for _ in range(3):
+            assert (await _start(client, _fresh()[0])).status_code == 202
+        r = await _start(client, _fresh()[0])
+        assert r.status_code == 429
+        assert r.json()["error"]["code"] == "RATE_LIMITED"
+        assert int(r.headers["retry-after"]) >= 1
+    finally:
+        async with app.state.session_factory() as s:
+            await SettingsStore(s).set("otp.start_rate_per_ip_per_hour", 10, None)
+            await s.commit()

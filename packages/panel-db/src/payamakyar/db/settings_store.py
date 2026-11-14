@@ -20,6 +20,7 @@ DEFAULTS: dict[str, Any] = {
     "auth.lockout_seconds": 900,
     "auth.password_min_length": 8,
     "auth.login_rate_per_ip_per_min": 20,
+    "otp.start_rate_per_ip_per_hour": 10,
     "otp.ttl_seconds": 120,
     "otp.max_attempts": 5,
     "otp.resend_seconds": 60,
