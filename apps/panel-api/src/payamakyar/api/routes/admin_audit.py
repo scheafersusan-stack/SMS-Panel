@@ -3,7 +3,7 @@
 import base64
 import binascii
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from payamakyar.api.deps import SessionDep, require
 from payamakyar.api.errors import validation_failed
+from payamakyar.core.masking import mask_mobile
 from payamakyar.db import audit
 from payamakyar.db.models import AuditEvent, LoginEvent
 
@@ -46,9 +47,11 @@ def _uuid_cursor(cursor: str) -> uuid.UUID:
         raise validation_failed("نشانگر صفحه‌بندی نامعتبر است.", "/cursor") from None
 
 
-def _utc(at: datetime | None) -> datetime | None:
+def _aware(at: datetime | None, name: str) -> datetime | None:
     if at is not None and at.tzinfo is None:
-        return at.replace(tzinfo=UTC)
+        raise validation_failed(
+            "زمان باید همراه با منطقه زمانی (مثلاً +03:30 یا Z) باشد.", f"/{name}"
+        )
     return at
 
 
@@ -112,9 +115,9 @@ async def list_audit(
         q = q.where(AuditEvent.action == action)
     if target_type:
         q = q.where(AuditEvent.target_type == target_type)
-    if (lo := _utc(from_)) is not None:
+    if (lo := _aware(from_, "from")) is not None:
         q = q.where(AuditEvent.at >= lo)
-    if (hi := _utc(to)) is not None:
+    if (hi := _aware(to, "to")) is not None:
         q = q.where(AuditEvent.at < hi)
     if cursor:
         q = q.where(AuditEvent.id < _int_cursor(cursor))
@@ -161,9 +164,9 @@ async def list_login_events(
         q = q.where(LoginEvent.user_id == user_id)
     if outcome:
         q = q.where(LoginEvent.outcome == outcome)
-    if (lo := _utc(from_)) is not None:
+    if (lo := _aware(from_, "from")) is not None:
         q = q.where(LoginEvent.at >= lo)
-    if (hi := _utc(to)) is not None:
+    if (hi := _aware(to, "to")) is not None:
         q = q.where(LoginEvent.at < hi)
     if cursor:
         q = q.where(LoginEvent.id < _uuid_cursor(cursor))
@@ -175,7 +178,7 @@ async def list_login_events(
             LoginEventItem(
                 id=r.id,
                 user_id=r.user_id,
-                username_tried=r.username_tried,
+                username_tried=mask_mobile(r.username_tried) if r.username_tried else None,
                 ip=str(r.ip) if r.ip is not None else None,
                 user_agent=r.user_agent,
                 outcome=r.outcome,

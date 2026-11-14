@@ -12,7 +12,7 @@ from sqlalchemy import select, text
 from payamakyar.api import sessions
 from payamakyar.core.passwords import hash_password
 from payamakyar.db import audit
-from payamakyar.db.models import AuditEvent, LoginEvent, Role, User, UserRole
+from payamakyar.db.models import AuditEvent, LoginEvent, Role, RolePermission, User, UserRole
 
 pytestmark = pytest.mark.integration
 
@@ -83,23 +83,18 @@ async def test_staff_without_mfa_gets_mfa_required(app: FastAPI) -> None:
 
 
 async def test_staff_without_audit_view_forbidden(app: FastAPI) -> None:
+    name = f"noaudit_{uuid.uuid4().hex[:6]}"
     async with app.state.session_factory() as s:
-        # a staff role lacking audit.view
-        row = (
-            await s.execute(
-                text(
-                    "SELECT r.name FROM roles r WHERE r.is_staff AND NOT EXISTS ("
-                    "SELECT 1 FROM role_permissions rp WHERE rp.role_id = r.id "
-                    "AND rp.permission_code = 'audit.view') LIMIT 1"
-                )
-            )
-        ).scalar_one_or_none()
-    if row is None:
-        pytest.skip("every staff role holds audit.view")
-    _, c = await _make(app, (row,))
+        role = Role(name=name, title_fa="بدون حسابرسی", is_staff=True)
+        s.add(role)
+        await s.flush()
+        s.add(RolePermission(role_id=role.id, permission_code="roles.manage"))
+        await s.commit()
+    _, c = await _make(app, (name,))
     async with c:
         r = await c.get(AUDIT)
-    assert r.status_code == 403
+        assert r.status_code == 403 and r.json()["error"]["code"] == "FORBIDDEN"
+        assert (await c.get(LOGINS)).status_code == 403
 
 
 async def test_paging_and_cursor(app: FastAPI) -> None:
@@ -258,3 +253,27 @@ async def test_login_events(app: FastAPI) -> None:
         assert b4["items"] == []
         r = await c.get(LOGINS, params={"cursor": "zzz"})
         assert r.status_code == 422
+
+
+@pytest.mark.parametrize("url", [AUDIT, LOGINS])
+@pytest.mark.parametrize("name", ["from", "to"])
+async def test_naive_datetime_rejected(app: FastAPI, url: str, name: str) -> None:
+    _, c = await _make(app, ("admin",))
+    async with c:
+        r = await c.get(url, params={name: "2026-01-01T00:00:00"})
+        assert r.status_code == 422
+        e = r.json()["error"]
+        assert e["code"] == "VALIDATION_FAILED" and e["source"]["pointer"] == f"/{name}"
+        assert (await c.get(url, params={name: "2026-01-01T00:00:00+03:30"})).status_code == 200
+
+
+async def test_login_events_mask_mobile_username(app: FastAPI) -> None:
+    _, c = await _make(app, ("admin",))
+    async with app.state.session_factory() as s:
+        s.add(LoginEvent(username_tried="09123456789", outcome="bad_password"))
+        s.add(LoginEvent(username_tried="somebody", outcome="bad_password"))
+        await s.commit()
+    async with c:
+        items = (await c.get(LOGINS, params={"outcome": "bad_password"})).json()["items"]
+    names = {i["username_tried"] for i in items}
+    assert "09123456789" not in names and "0912***6789" in names and "somebody" in names

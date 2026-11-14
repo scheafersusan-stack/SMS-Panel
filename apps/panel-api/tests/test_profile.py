@@ -206,8 +206,10 @@ async def test_identity_reset_on_national_code_or_birth_date(app: FastAPI) -> No
     async with c:
         # same value: no reset
         r = await c.put("/panel/web/v1/account/profile", json={"national_code": NC})
+        assert r.status_code == 200
         assert (await c.get("/panel/web/v1/account/me")).json()["identity_state"] == "matched"
         r = await c.put("/panel/web/v1/account/profile", json={"first_name": "علی"})
+        assert r.status_code == 200
         assert (await c.get("/panel/web/v1/account/me")).json()["identity_state"] == "matched"
         r = await c.put("/panel/web/v1/account/profile", json={"birth_date": "1990-05-17"})
         assert r.json()["identity_state"] == "none"
@@ -267,3 +269,25 @@ async def test_profile_requires_csrf(app: FastAPI) -> None:
         c.headers.pop("X-CSRF-Token")
         r = await c.put("/panel/web/v1/account/profile", json={"first_name": "x"})
     assert r.status_code == 403
+
+
+@pytest.mark.parametrize("field", ["ceo_national_code", "company_national_id"])
+async def test_company_identity_reset(app: FastAPI, field: str) -> None:
+    _, c = await _make(app, kind="company", identity_state="matched", **COMPANY)
+    new = {"ceo_national_code": NC, "company_national_id": "10380284790"}[field]
+    if field == "company_national_id":
+        new = "14003778990"
+        assert is_valid_company_id(new)
+    async with c:
+        r = await c.put("/panel/web/v1/account/profile", json={field: new})
+    assert r.status_code == 200, r.text
+    assert r.json()["identity_state"] == "none"
+
+
+@pytest.mark.parametrize("value", [None, ""])
+async def test_clearing_national_code_resets_identity(app: FastAPI, value: str | None) -> None:
+    _, c = await _make(app, identity_state="matched", national_code=NC)
+    async with c:
+        r = await c.put("/panel/web/v1/account/profile", json={"national_code": value})
+    assert r.status_code == 200, r.text
+    assert r.json()["identity_state"] == "none" and r.json()["national_code"] is None

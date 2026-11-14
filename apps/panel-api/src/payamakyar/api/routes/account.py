@@ -122,20 +122,14 @@ async def update_profile(
             after[field] = profile.display(field, new)
             setattr(user, field, new)
     if before:
-        if profile.IDENTITY_FIELDS & before.keys() and user.identity_state != "none":
+        if (
+            profile.IDENTITY_FIELDS.get(user.kind, frozenset()) & before.keys()
+            and user.identity_state != "none"
+        ):
             before["identity_state"] = user.identity_state
             after["identity_state"] = "none"
             user.identity_state = "none"
-        await audit.record(
-            s,
-            actor_id=user.id,
-            actor_ip=client_ip(request) or None,
-            action="user.profile_update",
-            target_type="user",
-            target_id=str(user.id),
-            before=before,
-            after=after,
-        )
+        await _audit_user(s, user, request, "user.profile_update", before=before, after=after)
         await s.flush()
     return await _me(s, user, perms)
 

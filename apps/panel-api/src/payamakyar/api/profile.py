@@ -46,7 +46,10 @@ REQUIRED = {
     ),
     "company": COMPANY_FIELDS,
 }
-IDENTITY_FIELDS = frozenset({"national_code", "birth_date"})
+IDENTITY_FIELDS = {
+    "person": frozenset({"national_code", "birth_date"}),
+    "company": frozenset({"company_national_id", "ceo_national_code"}),
+}
 _MASKED = frozenset({"national_code", "company_national_id", "ceo_national_code"})
 _EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s.]+")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
