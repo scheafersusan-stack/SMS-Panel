@@ -118,7 +118,7 @@ async def test_csrf_admin_prefix_and_exemptions(app: FastAPI, client: httpx.Asyn
         assert r.status_code == 403
         for exempt in ("auth/login", "auth/register/start", "auth/reset/confirm"):
             r = await client.post(f"{prefix}/{exempt}")
-            assert r.status_code == 404  # passed CSRF, no route yet
+            assert r.status_code in (404, 422)  # passed CSRF (404: no route, 422: empty body)
         r = await client.post(f"{prefix}/auth/login/extra")
         assert r.status_code == 403
         r = await client.post(f"{prefix}/auth/register")
