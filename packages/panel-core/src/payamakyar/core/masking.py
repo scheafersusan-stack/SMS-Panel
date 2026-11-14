@@ -6,7 +6,12 @@ from typing import Any
 
 from pydantic import SecretStr
 
-from payamakyar.core.phone import InvalidMobile, format_mobile_local, normalize_mobile
+from payamakyar.core.phone import (
+    InvalidMobile,
+    format_mobile_local,
+    normalize_mobile,
+    to_ascii_digits,
+)
 
 _SECRET_SEGMENTS = frozenset(
     {"password", "passwd", "secret", "token", "otp", "authorization", "apikey"}
@@ -14,7 +19,7 @@ _SECRET_SEGMENTS = frozenset(
 _CODE_PREFIXES = frozenset(
     {"otp", "totp", "mfa", "verification", "verify", "sms", "auth", "login", "pin", "reset"}
 )
-_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 _SPLIT = re.compile(r"[\s_\-.]+")
 _OTP_LIKE = re.compile(r"[0-9]{4,10}")
 _D = "0-9۰-۹٠-٩"
@@ -23,7 +28,17 @@ _EMBEDDED = re.compile(rf"(?<![{_D}])(?:\+98|0098|98|0)[9۹٩][{_D}]{{9}}(?![{_D
 
 
 def _segments(key: str) -> list[str]:
-    return [p.lower() for p in _SPLIT.split(_CAMEL.sub("_", key)) if p]
+    segs = [p.lower() for p in _SPLIT.split(_CAMEL.sub("_", key)) if p]
+    # a trailing plural "s" is the same word (tokens, passwords, api_keys)
+    return [x[:-1] if len(x) > 3 and x.endswith("s") and x != "pass" else x for x in segs]
+
+
+def _looks_like_otp(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        value = str(value)
+    return isinstance(value, str) and bool(_OTP_LIKE.fullmatch(to_ascii_digits(value)))
 
 
 def is_secret_key(key: str, value: Any = None) -> bool:
@@ -41,7 +56,7 @@ def is_secret_key(key: str, value: Any = None) -> bool:
         i = segs.index("code")
         if i > 0 and segs[i - 1] in _CODE_PREFIXES:
             return True
-        return segs == ["code"] and isinstance(value, str) and bool(_OTP_LIKE.fullmatch(value))
+        return segs == ["code"] and _looks_like_otp(value)
     return False
 
 

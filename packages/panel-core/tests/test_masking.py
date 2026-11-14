@@ -54,6 +54,13 @@ def test_code_keys() -> None:
     }
     assert redact({"code": "123456"}) == {"code": "****"}
     assert redact({"code": 5}) == {"code": 5}
+    assert redact({"code": "۱۲۳۴۵۶"}) == {"code": "****"}
+    assert redact({"code": "١٢٣٤٥٦"}) == {"code": "****"}
+    assert redact({"code": 123456}) == {"code": "****"}
+    assert redact({"code": True}) == {"code": True}
+    assert redact({"status_code": 123456}) == {"status_code": 123456}
+    for k in ["tokens", "passwords", "secrets", "api_keys", "OTPCode", "APIKey", "OTP"]:
+        assert redact({k: "x"}) == {k: "****"}, k
     for k in [
         "otp_code",
         "verification_code",

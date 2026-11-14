@@ -47,6 +47,20 @@ def test_normalize_mobile_rejects(raw: str) -> None:
         normalize_mobile(raw)
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "९१२३४५६७८९",
+        "०९१२३४५६७८९",
+        "\uff10\uff19\uff11\uff12\uff13\uff14\uff15\uff16\uff17\uff18\uff19",
+        "९१२३४५६७८९०",
+    ],
+)
+def test_normalize_mobile_rejects_other_scripts(raw: str) -> None:
+    with pytest.raises(InvalidMobile):
+        normalize_mobile(raw)
+
+
 def test_format_mobile_local() -> None:
     assert format_mobile_local("989123456789") == "09123456789"
 
