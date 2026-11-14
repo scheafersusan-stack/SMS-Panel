@@ -17,7 +17,7 @@ from payamakyar.api.errors import (
     install_error_handlers,
     internal_error_response,
 )
-from payamakyar.api.routes import auth, health
+from payamakyar.api.routes import account, auth, health
 from payamakyar.core.settings import PanelSettings, get_settings
 from payamakyar.db.engine import create_engine, session_factory
 
@@ -77,6 +77,7 @@ def create_app(settings: PanelSettings | None = None) -> FastAPI:
 
     web = APIRouter(prefix="/panel/web/v1")
     web.include_router(auth.router)
+    web.include_router(account.router)
     admin = APIRouter(prefix="/panel/admin/v1")
     app.include_router(health.router)
     app.include_router(web)

@@ -116,12 +116,27 @@ async def test_csrf_admin_prefix_and_exemptions(app: FastAPI, client: httpx.Asyn
     for prefix in ("/panel/web/v1", "/panel/admin/v1"):
         r = await client.post(f"{prefix}/other")
         assert r.status_code == 403
-        for exempt in ("auth/login", "auth/register/start", "auth/reset/confirm"):
+        for exempt in (
+            "auth/login",
+            "auth/register/start",
+            "auth/reset/confirm",
+            "auth/mfa/confirm",
+            "auth/mfa/sms/send",
+        ):
             r = await client.post(f"{prefix}/{exempt}")
             # Past CSRF: 422 where the route exists (empty body), 404 where it does not yet.
-            assert r.status_code == (
-                422 if (prefix, exempt) == ("/panel/web/v1", "auth/register/start") else 404
+            web_routes = (
+                "auth/login",
+                "auth/register/start",
+                "auth/mfa/confirm",
+                "auth/mfa/sms/send",
             )
+            exists = prefix == "/panel/web/v1" and exempt in web_routes
+            assert r.status_code == (422 if exists else 404)
+        r = await client.post(f"{prefix}/auth/logout")
+        assert r.status_code == 403
+        r = await client.post(f"{prefix}/auth/mfa")
+        assert r.status_code == 403
         r = await client.post(f"{prefix}/auth/login/extra")
         assert r.status_code == 403
         r = await client.post(f"{prefix}/auth/register")

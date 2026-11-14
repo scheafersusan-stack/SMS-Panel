@@ -1,5 +1,6 @@
 """Request-scoped dependencies backed by ``app.state`` (set up in the lifespan)."""
 
+import hmac
 import ipaddress
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
@@ -9,7 +10,10 @@ from fastapi import Depends, Request
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from payamakyar.api import csrf, sessions
+from payamakyar.api.errors import ApiError
 from payamakyar.core.settings import PanelSettings
+from payamakyar.db.models import Session, User
 
 IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
@@ -78,3 +82,44 @@ def client_ip(request: Request) -> str:
         if not any(addr in n for n in nets):
             return result
     return result
+
+
+def _not_authenticated() -> ApiError:
+    return ApiError(401, "NOT_AUTHENTICATED", "ورود لازم است", "دوباره وارد حساب شوید.")
+
+
+async def current_session(
+    request: Request,
+    s: SessionDep,
+    settings: Annotated[PanelSettings, Depends(get_settings_dep)],
+    clock: Annotated[Callable[[], datetime], Depends(get_clock)],
+) -> Session:
+    """The live session from the ``pk_session`` cookie, or 401 ``NOT_AUTHENTICATED``.
+
+    On unsafe methods the ``X-CSRF-Token`` header must also be this session's CSRF token
+    (the middleware only checks that cookie and header agree).
+    """
+    token = request.cookies.get(settings.session_cookie_name, "")
+    row = await sessions.resolve(s, token, now=clock()) if token else None
+    if row is None:
+        raise _not_authenticated()
+    if request.method.upper() not in csrf.SAFE_METHODS:
+        header = request.headers.get(csrf.HEADER, "")
+        if not header or not hmac.compare_digest(sessions.hash_token(header), row.csrf_hash):
+            raise ApiError(
+                403, "CSRF_FAILED", "درخواست نامعتبر است", "توکن CSRF نامعتبر یا ناموجود است."
+            )
+    return row
+
+
+CurrentSession = Annotated[Session, Depends(current_session)]
+
+
+async def current_user(row: CurrentSession, s: SessionDep) -> User:
+    user = await s.get(User, row.user_id)
+    if user is None:
+        raise _not_authenticated()
+    return user
+
+
+CurrentUser = Annotated[User, Depends(current_user)]

@@ -1,4 +1,9 @@
-"""Double-submit CSRF: cookie ``pk_csrf`` must equal header ``X-CSRF-Token`` on unsafe methods."""
+"""Double-submit CSRF: cookie ``pk_csrf`` must equal header ``X-CSRF-Token`` on unsafe methods.
+
+Exempt: ``auth/login`` and everything under ``auth/register/``, ``auth/reset/`` and
+``auth/mfa/`` (these run before a session exists; MFA calls carry the sealed ``mfa_token``).
+For authenticated calls ``deps.current_session`` also binds the header to the session.
+"""
 
 import hmac
 
@@ -8,7 +13,7 @@ PREFIXES = ("/panel/web/v1", "/panel/admin/v1")
 HEADER = "x-csrf-token"
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _EXEMPT_EXACT = frozenset(f"{p}/auth/login" for p in PREFIXES)
-_EXEMPT_PREFIX = tuple(f"{p}/auth/{g}/" for p in PREFIXES for g in ("register", "reset"))
+_EXEMPT_PREFIX = tuple(f"{p}/auth/{g}/" for p in PREFIXES for g in ("register", "reset", "mfa"))
 
 
 def is_protected(method: str, path: str) -> bool:

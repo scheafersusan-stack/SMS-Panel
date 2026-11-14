@@ -1,4 +1,8 @@
-"""Server-side sessions: opaque random token (only its hash is stored) plus a CSRF token."""
+"""Server-side sessions: opaque random token (only its hash is stored) plus a CSRF token.
+
+Idle and absolute lifetimes come from the settings store (``session.idle_seconds``,
+``session.absolute_seconds``). A session also dies when its user is deactivated or expires.
+"""
 
 import hashlib
 import secrets
@@ -11,14 +15,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from payamakyar.core.settings import PanelSettings
 from payamakyar.db.models import Session, User
+from payamakyar.db.settings_store import SettingsStore
 
-DEFAULT_IDLE_SECONDS = 1800
-DEFAULT_ABSOLUTE_SECONDS = 43200
 TOUCH_INTERVAL_SECONDS = 60
 
 
 def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+async def absolute_lifetime(s: AsyncSession) -> int:
+    return int(await SettingsStore(s).get("session.absolute_seconds"))
+
+
+async def idle_lifetime(s: AsyncSession) -> int:
+    return int(await SettingsStore(s).get("session.idle_seconds"))
+
+
+def user_can_sign_in(user: User, at: datetime) -> bool:
+    return user.status == "active" and (user.expires_at is None or at < user.expires_at)
 
 
 async def create(
@@ -29,10 +44,11 @@ async def create(
     impersonator_id: uuid.UUID | None = None,
     *,
     now: datetime | None = None,
-    absolute_seconds: int = DEFAULT_ABSOLUTE_SECONDS,
+    absolute_seconds: int | None = None,
 ) -> tuple[str, str]:
     """Insert a session row and return ``(token, csrf)``. Does not commit."""
     at = now or datetime.now(UTC)
+    lifetime = absolute_seconds if absolute_seconds is not None else await absolute_lifetime(s)
     token = secrets.token_urlsafe(32)
     csrf = secrets.token_urlsafe(32)
     s.add(
@@ -41,10 +57,10 @@ async def create(
             token_hash=hash_token(token),
             csrf_hash=hash_token(csrf),
             ip=ip or None,
-            user_agent=ua,
+            user_agent=ua[:512] if ua else None,
             created_at=at,
             last_seen_at=at,
-            expires_at=at + timedelta(seconds=absolute_seconds),
+            expires_at=at + timedelta(seconds=lifetime),
             impersonator_id=impersonator_id,
         )
     )
@@ -57,17 +73,25 @@ async def resolve(
     token: str,
     *,
     now: datetime | None = None,
-    idle_seconds: int = DEFAULT_IDLE_SECONDS,
+    idle_seconds: int | None = None,
 ) -> Session | None:
     """Return the live session for ``token`` or None; refreshes ``last_seen_at`` at most
     once per ``TOUCH_INTERVAL_SECONDS``. Does not commit."""
     at = now or datetime.now(UTC)
-    row = (
-        await s.execute(select(Session).where(Session.token_hash == hash_token(token)))
-    ).scalar_one_or_none()
-    if row is None or row.revoked_at is not None or at >= row.expires_at:
+    found = (
+        await s.execute(
+            select(Session, User)
+            .join(User, User.id == Session.user_id)
+            .where(Session.token_hash == hash_token(token))
+        )
+    ).first()
+    if found is None:
         return None
-    if at - row.last_seen_at >= timedelta(seconds=idle_seconds):
+    row, user = found
+    if row.revoked_at is not None or at >= row.expires_at or not user_can_sign_in(user, at):
+        return None
+    idle = idle_seconds if idle_seconds is not None else await idle_lifetime(s)
+    if at - row.last_seen_at >= timedelta(seconds=idle):
         return None
     if at - row.last_seen_at >= timedelta(seconds=TOUCH_INTERVAL_SECONDS):
         row.last_seen_at = at
@@ -104,3 +128,12 @@ def set_cookies(
         httponly=False,
         samesite="lax",
     )
+
+
+def clear_cookies(response: Response, settings: PanelSettings) -> None:
+    secure = settings.env not in ("dev", "test")
+    for name, httponly in (
+        (settings.session_cookie_name, True),
+        (settings.csrf_cookie_name, False),
+    ):
+        response.delete_cookie(name, path="/", secure=secure, httponly=httponly, samesite="lax")

@@ -87,3 +87,35 @@ def test_cookie_attributes(env: str, secure: bool) -> None:
         assert "samesite=lax" in c
         assert "path=/" in c
         assert ("secure" in c) is secure
+
+
+async def test_resolve_rejects_inactive_or_expired_user(db_session: AsyncSession) -> None:
+    user = await _user(db_session, "sess_c")
+    token, _ = await sessions.create(db_session, user, None, None, now=T0)
+    assert await sessions.resolve(db_session, token, now=T0) is not None
+    user.status = "inactive"
+    await db_session.flush()
+    assert await sessions.resolve(db_session, token, now=T0) is None
+    user.status = "active"
+    user.expires_at = T0 + timedelta(seconds=10)
+    await db_session.flush()
+    assert await sessions.resolve(db_session, token, now=T0) is not None
+    assert await sessions.resolve(db_session, token, now=T0 + timedelta(seconds=10)) is None
+    await db_session.rollback()
+
+
+async def test_lifetimes_come_from_settings_store(db_session: AsyncSession) -> None:
+    from payamakyar.db.settings_store import DEFAULTS, SettingsStore
+
+    assert DEFAULTS["session.idle_seconds"] == 1800
+    assert DEFAULTS["session.absolute_seconds"] == 43200
+    store = SettingsStore(db_session)
+    await store.set("session.idle_seconds", 120, None)
+    await store.set("session.absolute_seconds", 600, None)
+    user = await _user(db_session, "sess_d")
+    token, _ = await sessions.create(db_session, user, None, None, now=T0)
+    row = (await db_session.execute(select(Session).where(Session.user_id == user.id))).scalar_one()
+    assert row.expires_at == T0 + timedelta(seconds=600)
+    assert await sessions.resolve(db_session, token, now=T0 + timedelta(seconds=119)) is not None
+    assert await sessions.resolve(db_session, token, now=T0 + timedelta(seconds=119 + 120)) is None
+    await db_session.rollback()
