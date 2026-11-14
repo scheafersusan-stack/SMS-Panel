@@ -1,0 +1,13 @@
+[project]
+name = "payamakyar-panel-api"
+version = "0.1.0"
+description = "HTTP API for the Payamakyar panel"
+requires-python = ">=3.12,<3.13"
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "redis>=8,<9", "payamakyar-panel-core", "payamakyar-panel-db"]
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "payamakyar.api"

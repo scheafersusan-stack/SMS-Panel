@@ -1,0 +1,91 @@
+[project]
+name = "payamakyar"
+version = "0.0.0"
+description = "Payamakyar: Persian SMS panel"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*", "apps/*"]
+exclude = ["apps/panel-web"]
+
+[tool.uv.sources]
+payamakyar-panel-core = { workspace = true }
+payamakyar-panel-db = { workspace = true }
+payamakyar-panel-api = { workspace = true }
+
+[dependency-groups]
+dev = [
+  "ruff>=0.17,<0.18",
+  "mypy>=2.4,<3",
+  "pytest>=9,<10",
+  "pytest-cov>=7,<8",
+  "pytest-asyncio>=1.4,<2",
+  "bandit>=1.9,<2",
+  "pip-audit>=2.10,<3",
+  "pyyaml>=6,<7",
+  "types-PyYAML",
+  "httpx>=0.28,<1",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["docs", ".worktrees", ".build", "node_modules", "apps/panel-web", ".superpowers"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "RUF", "ANN", "S"]
+ignore = ["ANN401"]
+# Persian orthography is not a confusable: ZWNJ, the letters alef/heh (and heh
+# variants), the Arabic-Indic and Persian digits ruff maps to 0/1/5/7, and the
+# Arabic decimal separator.
+allowed-confusables = [
+  "\u200c",
+  "\u0627", "\u0647", "\u06be", "\u06c1", "\u06d5",
+  "\u0660", "\u0661", "\u0665", "\u0667",
+  "\u06f0", "\u06f1", "\u06f5", "\u06f7",
+  "\u066b",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S101", "S105", "S106"]
+"tests/**" = ["S101", "S105", "S106"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["payamakyar"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+namespace_packages = true
+explicit_package_bases = true
+plugins = ["pydantic.mypy"]
+mypy_path = "packages/panel-core/src:packages/panel-db/src:apps/panel-api/src"
+files = ["packages", "apps", "tests"]
+exclude = ["^(packages|apps)/[^/]+/tests/", "\\.worktrees/", "\\.build/", "node_modules/", "apps/panel-web/"]
+
+[tool.pytest.ini_options]
+testpaths = ["packages", "apps", "tests"]
+addopts = "--import-mode=importlib --strict-markers --strict-config -ra"
+markers = [
+  "integration: needs Postgres and Redis (PAYAMAKYAR_TEST_DATABASE_URL, PAYAMAKYAR_TEST_REDIS_URL)",
+  "ui: needs the built web artefact (apps/panel-web/dist)",
+]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+norecursedirs = ["node_modules", ".venv", ".worktrees", ".build", "dist", "apps/panel-web"]
+
+[tool.coverage.run]
+source = ["packages", "apps"]
+branch = true
+omit = ["*/tests/*", "*/alembic/*", "*/node_modules/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.bandit]
+exclude_dirs = [".venv", ".worktrees", ".build", "node_modules", "tests", "apps/panel-web"]
